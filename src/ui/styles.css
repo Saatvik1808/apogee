@@ -1,0 +1,299 @@
+/*
+ * LEARNING NOTE: A UI layer over a WebGL canvas
+ *
+ * The 3D world is one full-screen <canvas>; every panel, gauge and menu is plain
+ * HTML/CSS layered on top. The browser's layout engine is superb at text and
+ * responsive layout, so we let it do that job, and keep WebGL for the world.
+ * CSS custom properties (variables) define one visual language used everywhere:
+ * dark translucent glass, hairline borders, an amber accent for actions and cyan
+ * for telemetry — the look of a modern mission control.
+ */
+@font-face {
+  font-family: 'Rajdhani';
+  src: url('/assets/fonts/rajdhani-500.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Rajdhani';
+  src: url('/assets/fonts/rajdhani-600.woff2') format('woff2');
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Rajdhani';
+  src: url('/assets/fonts/rajdhani-700.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Inter';
+  src: url('/assets/fonts/inter-var.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/assets/fonts/jetbrains-mono-var.woff2') format('woff2');
+  font-weight: 400 800;
+  font-display: swap;
+}
+
+:root {
+  /* One deliberate look: a dark mission-control UI over the 3D world */
+  color-scheme: dark;
+  --bg: #05070c;
+  --panel: rgba(10, 14, 22, 0.72);
+  --panel-solid: #0b1019;
+  --panel-2: rgba(18, 24, 36, 0.78);
+  --line: rgba(160, 190, 230, 0.14);
+  --line-strong: rgba(160, 190, 230, 0.28);
+  --text: #e8eef7;
+  --text-dim: #93a1b5;
+  --text-faint: #5d6a7d;
+  --accent: #ff8a3d;
+  --accent-2: #ffb36b;
+  --accent-glow: rgba(255, 138, 61, 0.35);
+  --cyan: #5ad8ff;
+  --cyan-dim: rgba(90, 216, 255, 0.5);
+  --green: #6ff2a4;
+  --red: #ff5a5a;
+  --yellow: #ffd65a;
+  --magenta: #ff6bd6;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --blur: blur(14px) saturate(140%);
+  --font-display: 'Rajdhani', 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+.game-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+}
+
+.ui-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ui-root > .ui-auto {
+  pointer-events: auto;
+}
+
+.ui-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ui-layer > * {
+  pointer-events: auto;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.display {
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+
+/* ------------------------------------------------------------------ panels */
+.panel {
+  background: var(--panel);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.panel-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+/* ----------------------------------------------------------------- buttons */
+.btn {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.08s, box-shadow 0.15s;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(200, 220, 255, 0.45);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, #ff9a52, #f06f22);
+  border-color: #ffb27a;
+  color: #1a0d04;
+  box-shadow: 0 6px 24px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.btn.primary:hover {
+  background: linear-gradient(180deg, #ffab6c, #ff7a2c);
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.small {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 0 1px rgba(90, 216, 255, 0.2) inset;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ----------------------------------------------------------------- loading */
+.loading {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 50% 120%, #10213f 0%, #05070c 55%);
+  transition: opacity 0.9s ease;
+}
+
+.loading.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loading .logo {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(48px, 9vw, 110px);
+  letter-spacing: 0.42em;
+  margin-right: -0.42em;
+  color: #fff;
+  text-shadow: 0 0 40px rgba(120, 180, 255, 0.35);
+}
+
+.loading .sub {
+  margin-top: 8px;
+  font-family: var(--font-display);
+  letter-spacing: 0.5em;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.loading .bar {
+  margin-top: 48px;
+  width: min(420px, 70vw);
+  height: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.loading .bar > div {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--cyan), var(--accent));
+  transition: width 0.25s ease;
+}
+
+.loading .status {
+  margin-top: 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.05em;
+  min-height: 1em;
+}
+
+.loading .error {
+  margin-top: 20px;
+  color: var(--red);
+  max-width: 560px;
+  text-align: center;
+  line-height: 1.5;
+}

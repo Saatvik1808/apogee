@@ -1,0 +1,9 @@
+node_modules
+dist
+raw-assets
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.claude/
+.env*
