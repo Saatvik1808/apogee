@@ -155,6 +155,70 @@ describe('Orbital operations', () => {
     expect(dist).toBeGreaterThan(0.5);
   }, 60_000);
 
+  it('docks from 25 m using only port alignment and the docking readout (the phone controls)', () => {
+    const { sim, sys } = makeSim();
+    const chaser = sim.active;
+    sim.placeInOrbit(chaser, sys.earth, 400_000, 0);
+    const station = Vessel.fromCraft(stationCraft('Keystone'), sys.earth);
+    station.r.copy(chaser.r);
+    station.v.copy(chaser.v);
+    // Station faces us (flipped about our dorsal axis) and is tilted 10° off our line of sight
+    const Q = station.q.constructor as new () => typeof station.q;
+    const dorsal = new Vector3(0, 0, 1).applyQuaternion(chaser.q);
+    const right = new Vector3(1, 0, 0).applyQuaternion(chaser.q);
+    station.q.copy(chaser.q).premultiply(new Q().setFromAxisAngle(dorsal, Math.PI)).premultiply(new Q().setFromAxisAngle(right, (10 * Math.PI) / 180));
+    const [cp] = chaser.freeDockPorts();
+    const [sp] = station.freeDockPorts();
+    const pos = new Vector3();
+    const dir = new Vector3();
+    const sPos = new Vector3();
+    chaser.dockFacePose(cp!.part, cp!.face, pos, dir);
+    station.dockFacePose(sp!.part, sp!.face, sPos, new Vector3());
+    // Station port 25 m ahead, 1.5 m to our right and 0.8 m "up"
+    const want = pos.clone().addScaledVector(dir, 25).addScaledVector(right, 1.5).addScaledVector(dorsal, 0.8);
+    station.r.add(want.sub(sPos));
+    station.situation = 'orbiting';
+    station.airborneTime = 1e6;
+    sim.addVessel(station);
+    sim.target = station;
+    run(sim, 0.2);
+    const d = sim.dock;
+    expect(d.valid).toBe(true);
+    // The readout must say "ahead, to the right, up" — the scope's sign convention
+    expect(d.offset.z).toBeGreaterThan(20);
+    expect(d.offset.x).toBeGreaterThan(1);
+    expect(d.offset.y).toBeGreaterThan(0.4);
+    // Phone controls: ALIGN (SAS port mode) + RCS, translation from the readout only
+    const c = chaser.controls;
+    c.sas = true;
+    c.sasMode = 'port';
+    c.rcs = true;
+    const clampU = (x: number) => Math.max(-1, Math.min(1, x));
+    let docked = false;
+    let steps = 0;
+    for (; steps < 400 * 60 && !docked; steps++) {
+      if (d.valid) {
+        // Pilot frame (right, up, forward). Aim to null the lateral offset first, then close slowly.
+        const k = 0.15;
+        const lateralOk = d.lateral < 0.25 || d.distance > 6;
+        const wantClosing = lateralOk && d.angle < (8 * Math.PI) / 180 ? Math.min(0.35, 0.06 * d.offset.z + 0.05) : 0;
+        const px = clampU(4 * (d.relVel.x + k * d.offset.x));
+        const pu = clampU(4 * (d.relVel.y + k * d.offset.y));
+        const pf = clampU(4 * (d.relVel.z + wantClosing));
+        // Nose port: pilot frame = vessel frame (x right, y forward, z up)
+        c.tx = px;
+        c.ty = pf;
+        c.tz = pu;
+      }
+      sim.update(1 / 60);
+      for (const e of sim.events) if (e.kind === 'docked') docked = true;
+      sim.events.length = 0;
+    }
+    log(`port-align docking: docked=${docked} after ${(steps / 60).toFixed(0)} s, rcs left ${chaser.parts.filter((p) => p.def.rcs).reduce((a, p) => a + p.fuel, 0).toFixed(1)} kg`);
+    expect(docked).toBe(true);
+    expect(sim.vessels.filter((x) => !x.destroyed).length).toBe(1);
+  }, 120_000);
+
   it('plans an intercept and a velocity match to reach a station', () => {
     const { sim, sys } = makeSim();
     const chaser = sim.active;

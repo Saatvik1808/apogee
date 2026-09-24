@@ -25,6 +25,7 @@ export const MARKER_COLORS: Record<string, string> = {
   'anti-target': '#ff5ad2',
   maneuver: '#4d8dff',
   stability: '#e8eef7',
+  port: '#6ff2a4',
 };
 
 const SHAPES: Record<SASMode, string> = {
@@ -38,6 +39,7 @@ const SHAPES: Record<SASMode, string> = {
   target: '<circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.5"/><path d="M12 6V2M12 18v4M6 12H2M18 12h4"/>',
   'anti-target': '<circle cx="12" cy="12" r="6"/><path d="M8 8l8 8M16 8l-8 8"/>',
   maneuver: '<circle cx="12" cy="12" r="7"/><path d="M12 5l3 5h-6zM5 16l5-2v3zM19 16l-5-2v3z"/>',
+  port: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/>',
 };
 
 export function sasIcon(mode: SASMode, size = 22, color?: string): string {

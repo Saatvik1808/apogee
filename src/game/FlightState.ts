@@ -14,8 +14,9 @@
  * Key concepts: game loop orchestration, separation of concerns, event
  * handling, floating origin
  */
-import { Matrix4, Quaternion, Vector3 } from 'three';
-import { AERO_BREAKUP_LOAD, DEG, G0, RAD } from '../core/constants';
+import { Matrix4, Object3D, Quaternion, SpotLight, Vector3 } from 'three';
+import { AERO_BREAKUP_LOAD, DEG, DOCK_MAX_ANGLE, DOCK_MAX_SPEED, G0, RAD } from '../core/constants';
+import type { FlightPart } from '../sim/FlightPart';
 import { clamp } from '../core/math';
 import type { CraftData } from '../parts/Craft';
 import { analyzeStages, type StageInfo } from '../parts/DeltaV';
@@ -33,9 +34,9 @@ import { burnLeadTime } from '../sim/Maneuver';
 import { Vessel, type SASMode } from '../sim/Vessel';
 import type { FlightEvent } from '../sim/VesselPhysics';
 import { planCapture, planCircularize, planCorrection, planDeorbit, planIntercept, planMarsTransfer, planMatchVelocity, planMoonTransfer, planReturnToEarth, type PlanResult } from '../sim/Planner';
-import { FlightHUD, type HudActions, type ObjectiveView, type PlanKind, type TargetView } from '../ui/FlightHUD';
+import { FlightHUD, type DockView, type HudActions, type ObjectiveView, type PlanKind, type TargetView } from '../ui/FlightHUD';
 import { Navball } from '../ui/Navball';
-import { TouchControls } from '../ui/TouchControls';
+import { TouchControls, type TouchOps } from '../ui/TouchControls';
 import { RadioFeed } from '../ui/StoryUI';
 import { h } from '../ui/dom';
 import { RadioDirector } from './story/RadioDirector';
@@ -85,6 +86,13 @@ const _q = new Quaternion();
 const _origin = new Vector3();
 const _tmp = new Vector3();
 const _m4 = new Matrix4();
+// Pilot frame of the docking-port view, in the vessel frame (forward, up, right)
+const _fL = new Vector3();
+const _uL = new Vector3();
+const _rL = new Vector3();
+const _camPos = new Vector3();
+const _camFwd = new Vector3();
+const _camUp = new Vector3();
 
 export class FlightState implements GameState {
   readonly sim: FlightSim;
@@ -186,6 +194,11 @@ export class FlightState implements GameState {
     }
 
     scene.add(this.effects.particles.smokeMesh, this.effects.particles.glowMesh, this.effects.engineLight, this.effects.flash);
+    // Docking floodlight (always in the scene so switching it on never recompiles shaders)
+    this.dockLight.castShadow = false;
+    this.dockLight.intensity = 0;
+    this.dockLight.target = this.dockLightTarget;
+    scene.add(this.dockLight, this.dockLightTarget);
     this.addView(v);
 
     // Camera framing
@@ -243,6 +256,8 @@ export class FlightState implements GameState {
       toggleRcs: () => this.toggleRcs(),
       undock: () => this.undockActive(),
       switchVessel: (d) => this.switchVessel(d),
+      toggleAlign: () => this.toggleAlign(),
+      toggleDockCam: () => this.toggleDockCam(),
     };
     this.hud = new FlightHUD(ctx.ui, actions, this.navball, ctx.platform.touch);
     this.hudTouch = ctx.platform.touch;
@@ -254,6 +269,12 @@ export class FlightState implements GameState {
       pause: () => ctx.ui.dispatchEvent(new CustomEvent('apogee:pause')),
       togglePanel: (p) => this.hud.togglePanel(p),
       setPhotoMode: (on) => this.hud.setVisible(!on),
+      toggleRcs: () => this.toggleRcs(),
+      cycleTarget: () => this.cycleTarget(),
+      toggleAlign: () => this.toggleAlign(),
+      toggleDockCam: () => this.toggleDockCam(),
+      undock: () => this.undockActive(),
+      switchVessel: () => this.switchVessel(1),
     });
     this.touch.setVisible(ctx.platform.touch);
     this.radioFeed = new RadioFeed(ctx.ui, (high) => ctx.audio.quindar(high));
@@ -493,8 +514,10 @@ export class FlightState implements GameState {
   }
 
   private cycleCamera(): void {
-    this.camera.mode = this.camera.mode === 'chase' ? 'tower' : this.camera.mode === 'tower' ? 'free' : 'chase';
-    this.hud.showToast(`${this.camera.mode} camera`, '', 1.4);
+    const m = this.camera.mode;
+    // chase → tower → free → docking port (when the vessel has a free port) → chase
+    this.camera.mode = m === 'chase' ? 'tower' : m === 'tower' ? 'free' : m === 'free' && this.pickDockCamPort() ? 'dock' : 'chase';
+    this.hud.showToast(this.camera.mode === 'dock' ? 'Port camera' : `${this.camera.mode} camera`, '', 1.4);
   }
 
   /** Short description of what the next STAGE press will do. */
@@ -613,25 +636,192 @@ export class FlightState implements GameState {
     }
     if (inp.isDown('ShiftLeft') || inp.isDown('ShiftRight')) c.throttle = clamp(c.throttle + dt * 0.7, 0, 1);
     if (inp.isDown('ControlLeft') || inp.isDown('ControlRight')) c.throttle = clamp(c.throttle - dt * 0.7, 0, 1);
-    // RCS translation in the vessel frame: H/N fore-aft, I/K up-down, J/L left-right
+    // RCS translation, read in the PILOT frame (right, up, forward): H/N forward-back,
+    // I/K up-down, J/L left-right — plus the touch translation stick
+    let px = 0;
+    let pu = 0;
+    let pf = 0;
     if (c.rcs && !this.mapMode) {
-      c.ty = (inp.isDown('KeyH') ? 1 : 0) - (inp.isDown('KeyN') ? 1 : 0);
-      c.tz = (inp.isDown('KeyI') ? 1 : 0) - (inp.isDown('KeyK') ? 1 : 0);
-      c.tx = (inp.isDown('KeyL') ? 1 : 0) - (inp.isDown('KeyJ') ? 1 : 0);
+      pf = (inp.isDown('KeyH') ? 1 : 0) - (inp.isDown('KeyN') ? 1 : 0);
+      pu = (inp.isDown('KeyI') ? 1 : 0) - (inp.isDown('KeyK') ? 1 : 0);
+      px = (inp.isDown('KeyL') ? 1 : 0) - (inp.isDown('KeyJ') ? 1 : 0);
+      if (this.ctx.platform.touch) {
+        px = clamp(px + this.touch.tx, -1, 1);
+        pu = clamp(pu + this.touch.tu, -1, 1);
+        pf = clamp(pf + this.touch.tf, -1, 1);
+      }
+    }
+    // Pilot frame → vessel frame. Normally they coincide (right = +X, up = dorsal
+    // +Z, forward = nose +Y); looking out of a docking port they follow the port
+    // view, so "up and right" on screen is "up and right" in the window even for a
+    // port on the vessel's tail.
+    if (this.camera.mode === 'dock' && this.dockCamPort && this.pilotBasis(this.dockCamPort, this.dockCamFace)) {
+      c.tx = _rL.x * px + _uL.x * pu + _fL.x * pf;
+      c.ty = _rL.y * px + _uL.y * pu + _fL.y * pf;
+      c.tz = _rL.z * px + _uL.z * pu + _fL.z * pf;
     } else {
-      c.tx = 0;
-      c.ty = 0;
-      c.tz = 0;
+      c.tx = px;
+      c.ty = pf;
+      c.tz = pu;
     }
     // Any manual steering or throttle input overrides the autopilot
     if (ap.mode !== 'off' && (c.pitch !== 0 || c.yaw !== 0 || c.roll !== 0)) ap.disengage('Manual override');
-    // Auto speed mode (surface near the ground, orbit higher up)
+    // Auto speed mode: target-relative near a target vessel (what docking needs),
+    // surface near the ground, orbit higher up
     if (!this.manualSpeedMode) {
       const v = this.sim.active;
-      const lim = v.body.atmosphere ? 36_000 : 12_000;
-      const want = v.altitude < lim ? 'surface' : 'orbit';
-      if (c.speedMode !== 'target') c.speedMode = want;
+      const ti = this.sim.targetInfo;
+      if (ti && this.sim.targetVessel && ti.distance < 3_000) c.speedMode = 'target';
+      else {
+        const lim = v.body.atmosphere ? 36_000 : 12_000;
+        c.speedMode = v.altitude < lim ? 'surface' : 'orbit';
+      }
     }
+  }
+
+  /**
+   * The docking-port view frame in vessel coordinates: forward along the port's
+   * open face, up along the dorsal side made perpendicular to it, right =
+   * forward × up (so it matches the camera's screen axes). Results in _fL/_uL/_rL.
+   */
+  private pilotBasis(port: FlightPart, face: 1 | -1): boolean {
+    if (!this.sim.active.parts.includes(port)) return false;
+    _fL.set(0, face, 0).applyQuaternion(port.rotation);
+    _uL.set(0, 0, 1).addScaledVector(_fL, -_fL.z);
+    if (_uL.lengthSq() < 1e-6) _uL.set(1, 0, 0).addScaledVector(_fL, -_fL.x);
+    _uL.normalize();
+    _rL.crossVectors(_fL, _uL);
+    return true;
+  }
+
+  /** Our docking port for the port camera: the one lined up with the target, else the free port facing most forward. */
+  private dockCamPort: FlightPart | null = null;
+  private dockCamFace: 1 | -1 = 1;
+
+  private pickDockCamPort(): boolean {
+    const sim = this.sim;
+    const v = sim.active;
+    const d = sim.dock;
+    if (d.valid && d.own && v.parts.includes(d.own)) {
+      this.dockCamPort = d.own;
+      this.dockCamFace = d.ownFace;
+      return true;
+    }
+    this.dockCamPort = null;
+    let best = -2;
+    for (const p of v.parts) {
+      const f = v.freePortFace(p);
+      if (!f) continue;
+      _tmp.set(0, f, 0).applyQuaternion(p.rotation);
+      if (_tmp.y > best) {
+        best = _tmp.y;
+        this.dockCamPort = p;
+        this.dockCamFace = f;
+      }
+    }
+    return !!this.dockCamPort;
+  }
+
+  /** Absolute pose of a docking port's face at render time: centre → _camPos, axis → _camFwd, view-up → _camUp. */
+  private portFacePose(p: FlightPart, face: 1 | -1): boolean {
+    if (!this.pilotBasis(p, face)) return false;
+    const v = this.sim.active;
+    this.sim.renderState(v, _abs, _q);
+    _camPos.set(0, (face * p.height) / 2, 0).applyQuaternion(p.rotation).add(p.position).sub(v.com).applyQuaternion(_q).add(_abs);
+    _camFwd.copy(_fL).applyQuaternion(_q);
+    _camUp.copy(_uL).applyQuaternion(_q);
+    return true;
+  }
+
+  /** Port camera: in front of our docking port, looking along it, screen-up = the vessel's dorsal side. */
+  private updateDockCam(dt: number): boolean {
+    if (!this.pickDockCamPort() || !this.dockCamPort) return false;
+    if (!this.portFacePose(this.dockCamPort, this.dockCamFace)) return false;
+    _camPos.addScaledVector(_camFwd, 0.35);
+    this.camera.updateDock(_camPos, _camFwd, _camUp, dt);
+    return true;
+  }
+
+  private readonly dockLight = new SpotLight(0xfff2de, 0, 0, 0.55, 0.9, 2);
+  private readonly dockLightTarget = new Object3D();
+
+  /**
+   * Docking floodlight: half of every orbit is night, and an unlit target is
+   * invisible against black space. Like the lights on a real crew vehicle, it
+   * shines along our port axis whenever a target port is within a few hundred
+   * metres (or the port camera is on). Its intensity follows the range squared,
+   * so the target stays evenly lit (≈ 1/25 of sunlight — plenty for eyes adapted
+   * to the dark) from far out to contact.
+   */
+  private updateDockLight(camAbs: Vector3): void {
+    const d = this.sim.dock;
+    const want = (d.valid && d.distance < 400) || this.camera.mode === 'dock';
+    const port = d.valid && d.own ? d.own : this.dockCamPort;
+    const face = d.valid && d.own ? d.ownFace : this.dockCamFace;
+    if (!want || !port || !this.portFacePose(port, face)) {
+      this.dockLight.intensity = 0;
+      return;
+    }
+    const range = d.valid ? Math.max(2, d.distance) : 30;
+    this.dockLight.intensity = Math.min(60_000, 0.8 * range * range);
+    this.dockLight.position.copy(_camPos).sub(camAbs).addScaledVector(_camFwd, 0.2);
+    this.dockLightTarget.position.copy(this.dockLight.position).addScaledVector(_camFwd, 10);
+    this.dockLightTarget.updateMatrixWorld();
+  }
+
+  private toggleAlign(): void {
+    const c = this.sim.active.controls;
+    if (c.sas && c.sasMode === 'port') {
+      this.setSASMode('stability');
+      this.hud.showToast('Port alignment off', '', 1.5);
+      return;
+    }
+    if (!this.sim.dock.valid) {
+      this.hud.showToast('No docking port in range', 'Target a vessel with a free port of the same size', 2.5);
+      return;
+    }
+    this.setSASMode('port');
+    this.hud.showToast('Aligning with the target port', 'SAS holds our port facing theirs — translate with RCS', 2.5);
+  }
+
+  private toggleDockCam(): void {
+    if (this.camera.mode === 'dock') {
+      this.camera.mode = 'chase';
+      this.hud.showToast('chase camera', '', 1.4);
+      return;
+    }
+    if (!this.pickDockCamPort()) {
+      this.hud.showToast('No free docking port', 'Add a docking port in the assembly building', 2.5);
+      return;
+    }
+    this.camera.mode = 'dock';
+    this.hud.showToast('Port camera', 'Looking out of the docking port', 1.8);
+  }
+
+  /** Reused readout objects (no allocation per frame). */
+  private readonly dockView: DockView = { target: '', distance: 0, closing: 0, lateral: 0, angleDeg: 0, x: 0, y: 0, vx: 0, vy: 0, capture: false, align: false, dockCam: false };
+  private readonly touchOps: TouchOps = { rcsAvailable: false, rcs: false, targets: false, dock: false, align: false, dockCam: false, docked: false, canSwitch: false };
+
+  private buildDockView(): DockView | null {
+    const sim = this.sim;
+    const d = sim.dock;
+    const tv = sim.targetVessel;
+    if (!d.valid || !tv) return null;
+    const o = this.dockView;
+    o.target = tv.name;
+    o.distance = d.distance;
+    o.closing = d.closing;
+    o.lateral = d.lateral;
+    o.angleDeg = (d.angle * 180) / Math.PI;
+    o.x = d.offset.x;
+    o.y = d.offset.y;
+    o.vx = d.relVel.x;
+    o.vy = d.relVel.y;
+    o.capture = d.angle < DOCK_MAX_ANGLE && sim.targetInfo !== null && sim.targetInfo.relSpeed < DOCK_MAX_SPEED;
+    const c = sim.active.controls;
+    o.align = c.sas && c.sasMode === 'port';
+    o.dockCam = this.camera.mode === 'dock';
+    return o;
   }
 
   private refreshStageInfo(): void {
@@ -713,8 +903,9 @@ export class FlightState implements GameState {
         const d = _abs.distanceTo(_tmp.copy(this.camera.towerBF).applyQuaternion(v.body.rotation).add(v.body.position));
         if (d > 25_000 || v.body.id !== this.params.site.body) this.camera.mode = 'chase';
       }
+      if (this.camera.mode === 'dock' && !this.updateDockCam(realDt)) this.camera.mode = 'chase';
       if (this.camera.mode === 'tower') this.camera.updateTower(_abs, v.body, realDt);
-      else {
+      else if (this.camera.mode !== 'dock') {
         this.camera.fov += (55 - this.camera.fov) * Math.min(1, realDt * 3);
         this.camera.updateOrbit(_abs, v.body, realDt, drag.dx, drag.dy, wheel);
       }
@@ -745,6 +936,21 @@ export class FlightState implements GameState {
     this.ctx.audio.updateMusic(realDt);
     this.ctx.audio.setMusicIntensity(v.totalThrust > 0 && v.inAtmosphere ? 0.25 : 0.8);
 
+    // Per-frame vessel counts for the HUD and the touch ops column (allocation-free loops)
+    let controllable = 0;
+    let otherVessels = 0;
+    for (const x of sim.vessels) {
+      if (x.destroyed || x.debris) continue;
+      if (x.isControllable) controllable++;
+      if (x !== v) otherVessels++;
+    }
+    let hasRcs = false;
+    let docked = false;
+    for (const p of v.parts) {
+      if (p.def.rcs) hasRcs = true;
+      if (p.dockedTo) docked = true;
+    }
+
     this.hud.update(
       sim,
       {
@@ -756,8 +962,9 @@ export class FlightState implements GameState {
         mapView: this.mapMode,
         target: this.targetView(),
         rcs: v.controls.rcs,
-        docked: sim.dockedPorts().length > 0,
-        vessels: sim.vessels.reduce((n, x) => n + (!x.destroyed && !x.debris && x.isControllable ? 1 : 0), 0),
+        docked,
+        vessels: controllable,
+        dock: this.mapMode ? null : this.buildDockView(),
       },
       realDt,
     );
@@ -772,7 +979,16 @@ export class FlightState implements GameState {
     this.touch.setVisible(touchOn);
     if (touchOn) {
       const nextUids = v.stages[v.nextStage];
-      this.touch.update(realDt, v.controls.throttle, this.nextStageLabel(), !!nextUids && !v.destroyed, this.hud.panels, this.mapMode);
+      const o = this.touchOps;
+      o.rcsAvailable = hasRcs && !v.destroyed;
+      o.rcs = v.controls.rcs;
+      o.targets = otherVessels > 0;
+      o.dock = sim.dock.valid && !this.mapMode;
+      o.align = v.controls.sas && v.controls.sasMode === 'port';
+      o.dockCam = this.camera.mode === 'dock';
+      o.docked = docked;
+      o.canSwitch = controllable > 1;
+      this.touch.update(realDt, v.controls.throttle, this.nextStageLabel(), !!nextUids && !v.destroyed, this.hud.panels, this.mapMode, o);
     }
     for (const tap of inp.takeTaps()) {
       if (this.mapMode) this.mapView.addNodeAt(tap.x, tap.y, tap.touch ? 60 : 30);
@@ -1015,6 +1231,10 @@ export class FlightState implements GameState {
         break;
       case 'docked':
         if (active) {
+          // The port we were looking out of is now closed: back to the outside view,
+          // and port alignment has nothing left to align to
+          if (this.camera.mode === 'dock') this.camera.mode = 'chase';
+          if (e.vessel.controls.sasMode === 'port') e.vessel.controls.sasMode = 'stability';
           this.hud.showToast('Hard dock', e.message, 4);
           this.hud.logEvent(met, e.message, 'good');
           this.ctx.audio.thud();
@@ -1132,6 +1352,8 @@ export class FlightState implements GameState {
       this.pad.update(up.dot(ctx.space.sunDir), this.frameDt, !isNaN(this.sim.launchTime));
     }
 
+    this.updateDockLight(camAbs);
+
     // Shadow camera follows the active vessel
     const v = this.sim.active;
     this.sim.renderState(v, _abs, _q);
@@ -1232,6 +1454,8 @@ export class FlightState implements GameState {
     }
     this.fairingMeshes.clear();
     scene.remove(this.effects.particles.smokeMesh, this.effects.particles.glowMesh, this.effects.engineLight, this.effects.flash);
+    scene.remove(this.dockLight, this.dockLightTarget);
+    this.dockLight.dispose();
     this.effects.particles.dispose();
     if (this.pad) this.pad.dispose();
     this.navball.dispose();

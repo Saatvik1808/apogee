@@ -802,7 +802,7 @@
   /* Anchor to the joystick (right: --sr + 96px, 128px wide) instead of the
      screen centre: on a 740-px phone a centred cluster sat under the stick */
   left: auto;
-  right: calc(var(--sr, 10px) + 240px);
+  right: calc(max(10px, var(--safe-right, 0px)) + 240px);
   transform: none;
   gap: 8px;
 }
@@ -969,4 +969,127 @@
 .hud .tgt-info {
   color: var(--text-dim);
   font-size: 11px;
+}
+
+/* --- docking scope ------------------------------------------------------ */
+.hud .dockcard {
+  position: absolute;
+  left: 14px;
+  /* under the mission card (measured when shown); clear of the view centre, the navball and the radio line */
+  top: var(--dk-top, 170px);
+  width: 262px;
+  display: none;
+}
+/* The event log moves below the docking card while it is shown */
+.hud.docking:not(.touch) .events {
+  top: calc(var(--dk-bottom, 350px) + 10px);
+  transform: none;
+}
+.hud .dockcard.show {
+  display: block;
+}
+.hud.map-mode .dockcard {
+  display: none;
+}
+.hud .dockcard.good {
+  border-color: var(--green);
+  box-shadow: var(--shadow), 0 0 18px rgba(111, 242, 164, 0.25);
+}
+.hud .dk-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 4px;
+}
+.hud .dk-scope {
+  flex: none;
+  line-height: 0;
+}
+.hud .dk-scope .dk-ring {
+  fill: none;
+  stroke: rgba(160, 190, 230, 0.28);
+  stroke-width: 1;
+}
+.hud .dk-scope .dk-cap {
+  fill: rgba(111, 242, 164, 0.08);
+  stroke: var(--green);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2;
+}
+.hud .dk-scope .dk-cross {
+  stroke: rgba(232, 238, 247, 0.55);
+  stroke-width: 1.2;
+}
+.hud .dk-scope .dk-vel {
+  stroke: var(--cyan);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.hud .dk-scope .dk-dot {
+  fill: var(--yellow);
+  stroke: #000;
+  stroke-width: 0.8;
+}
+.hud .dockcard.good .dk-scope .dk-dot {
+  fill: var(--green);
+}
+.hud .dk-nums {
+  flex: 1;
+  min-width: 0;
+}
+.hud .dk-btns {
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px 10px;
+}
+.hud .dk-btns .btn {
+  flex: 1;
+}
+.hud .dk-btns .btn.active {
+  border-color: var(--green);
+  color: var(--green);
+}
+/* Phones: under the icon bar, left of the ops column; its buttons live in the ops column */
+.hud.touch .dockcard {
+  left: auto;
+  right: calc(max(10px, var(--safe-right, 0px)) + 92px);
+  top: 48px;
+  width: 214px;
+}
+.hud.touch .dockcard .card-h {
+  padding: 5px 10px 4px;
+}
+.hud.touch .dk-body {
+  padding: 5px 8px;
+  gap: 8px;
+}
+.hud.touch .dk-scope svg {
+  width: 76px;
+  height: 76px;
+}
+.hud.touch .dockcard .dk-btns {
+  display: none;
+}
+/* Short phone screens: keep the scope card clear of the radio line below it */
+@media (max-height: 420px) {
+  .hud.touch .dockcard .card-h {
+    padding: 3px 9px 2px;
+  }
+  .hud.touch .dk-body {
+    padding: 3px 8px 4px;
+  }
+  .hud.touch .dk-scope svg {
+    width: 60px;
+    height: 60px;
+  }
+  .hud.touch .dockcard .row {
+    padding: 0;
+    font-size: 11px;
+  }
+  .hud.touch .dockcard .row .v {
+    font-size: 11.5px;
+  }
+}
+.hud.docking:not(.touch) .events .ev:nth-last-child(n + 5) {
+  display: none;
 }

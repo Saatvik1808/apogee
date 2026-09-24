@@ -36,7 +36,9 @@ export type SASMode =
   | 'radial-in'
   | 'target'
   | 'anti-target'
-  | 'maneuver';
+  | 'maneuver'
+  /** Turn so our docking port faces the target vessel's nearest free port. */
+  | 'port';
 
 export interface ControlState {
   /** Commanded throttle 0..1. */
@@ -290,13 +292,20 @@ export class Vessel {
   // Docking
   // ---------------------------------------------------------------------------
 
+  /** Open face of a docking port: +1 its top (+Y) is free, −1 its bottom, 0 not an open port. */
+  freePortFace(p: FlightPart): 0 | 1 | -1 {
+    if (!p.def.dock || p.destroyed || p.dockedTo) return 0;
+    if (!this.topNeighbor(p)) return 1;
+    if (!this.bottomNeighbor(p)) return -1;
+    return 0;
+  }
+
   /** Docking ports with an open face: +1 = the port's top (+Y) is free, −1 = its bottom. */
   freeDockPorts(): Array<{ part: FlightPart; face: 1 | -1 }> {
     const out: Array<{ part: FlightPart; face: 1 | -1 }> = [];
     for (const p of this.parts) {
-      if (!p.def.dock || p.destroyed || p.dockedTo) continue;
-      if (!this.topNeighbor(p)) out.push({ part: p, face: 1 });
-      else if (!this.bottomNeighbor(p)) out.push({ part: p, face: -1 });
+      const f = this.freePortFace(p);
+      if (f) out.push({ part: p, face: f });
     }
     return out;
   }

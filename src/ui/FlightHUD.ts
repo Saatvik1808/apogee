@@ -17,7 +17,7 @@
 import './hud.css';
 import { Vector3 } from 'three';
 import { formatDistance, formatDuration, formatMass, formatSpeed } from '../core/math';
-import { RAD } from '../core/constants';
+import { DOCK_CAPTURE_DISTANCE, DOCK_MAX_SPEED, RAD } from '../core/constants';
 import type { StageInfo } from '../parts/DeltaV';
 import { PROPELLANTS, type PropellantId } from '../parts/Propellants';
 import type { FlightSim } from '../sim/FlightSim';
@@ -55,6 +55,31 @@ export interface HudActions {
   undock(): void;
   /** Hand control to the next / previous vessel of this flight. */
   switchVessel(dir: 1 | -1): void;
+  /** SAS: hold our docking port facing the target port (toggle). */
+  toggleAlign(): void;
+  /** View out of our docking port (toggle). */
+  toggleDockCam(): void;
+}
+
+/** Final-approach readout (see FlightSim.DockingState), in the docking-port view frame. */
+export interface DockView {
+  target: string;
+  /** Port face to port face (m). */
+  distance: number;
+  /** Closing rate (m/s, negative when drifting apart). */
+  closing: number;
+  /** Offset across the approach axis (m) and axis misalignment (deg). */
+  lateral: number;
+  angleDeg: number;
+  /** Target port position across the view (m) and its drift (m/s): x right, y up. */
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  /** Would the ports latch if they touched now (speed and angle within limits)? */
+  capture: boolean;
+  align: boolean;
+  dockCam: boolean;
 }
 
 export type PlanKind = 'circ-ap' | 'circ-pe' | 'capture' | 'tli' | 'tmi' | 'mcc' | 'tei' | 'deorbit' | 'intercept' | 'match';
@@ -88,9 +113,20 @@ export interface HudExtra {
   docked: boolean;
   /** Controllable vessels in this flight (switching becomes available above one). */
   vessels: number;
+  /** Docking readout when a target port is in range. */
+  dock: DockView | null;
 }
 
-const SAS_MODES: SASMode[] = ['stability', 'maneuver', 'prograde', 'retrograde', 'normal', 'antinormal', 'radial-out', 'radial-in', 'target', 'anti-target'];
+const SAS_MODES: SASMode[] = ['stability', 'maneuver', 'prograde', 'retrograde', 'normal', 'antinormal', 'radial-out', 'radial-in', 'target', 'anti-target', 'port'];
+
+/** Docking scope: rings at the capture radius, 1 m and far out (tanh scale, 44 px ≈ ∞). */
+const SCOPE_R = 44;
+const scopeScale = (m: number) => SCOPE_R * Math.tanh(m / 2);
+const SCOPE_SVG = `<svg viewBox="-50 -50 100 100" width="92" height="92">
+<circle r="${SCOPE_R + 3}" class="dk-ring"/><circle r="${scopeScale(1).toFixed(1)}" class="dk-ring"/>
+<circle r="${scopeScale(DOCK_CAPTURE_DISTANCE).toFixed(1)}" class="dk-cap"/>
+<path d="M-47 0H-13M13 0H47M0 -47V-13M0 13V47" class="dk-cross"/>
+<line class="dk-vel" x1="0" y1="0" x2="0" y2="0"/><circle class="dk-dot" r="4.5" cx="0" cy="0"/></svg>`;
 
 const _p = new Vector3();
 const _n = new Vector3();
@@ -164,6 +200,22 @@ export class FlightHUD {
   // target
   private readonly tgtName: HTMLSpanElement;
   private readonly tgtInfo: HTMLSpanElement;
+  // docking
+  private readonly dockCard: HTMLDivElement;
+  private readonly dkName: HTMLSpanElement;
+  private readonly dkDist: HTMLSpanElement;
+  private readonly dkClose: HTMLSpanElement;
+  private readonly dkLat: HTMLSpanElement;
+  private readonly dkAng: HTMLSpanElement;
+  private readonly dkDot: SVGCircleElement;
+  private readonly dkVel: SVGLineElement;
+  private readonly dkAlignBtn: HTMLButtonElement;
+  private readonly dkCamBtn: HTMLButtonElement;
+  private dockShown = false;
+  private dockGood: boolean | null = null;
+  private readonly missionCard: HTMLDivElement;
+  /** Desktop: the docking card sits under the mission card, whose height changes with its objectives. */
+  private dockTopDirty = true;
   // autopilot
   private apTab: 'ascent' | 'node' | 'land' = 'ascent';
   private readonly apBody: HTMLDivElement;
@@ -215,6 +267,7 @@ export class FlightHUD {
     this.mSub = h('div', { class: 'sub', text: '' });
     this.objList = h('div', { style: 'padding-bottom:8px' });
     const missionCard = h('div', { class: 'mission card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Mission' }), h('span', { class: 'accent', text: '●' })), this.mTitle, this.mSub, this.objList);
+    this.missionCard = missionCard;
     // On phones the card shows only the current objective; tap to see them all
     missionCard.addEventListener('click', () => missionCard.classList.toggle('expanded'));
     this.root.appendChild(missionCard);
@@ -367,6 +420,32 @@ export class FlightHUD {
     this.mapBtn = h('button', { class: 'btn pe mapbtn', html: `${ICONS.map}&nbsp; Map (M)`, onClick: () => actions.toggleMap() });
     this.root.appendChild(this.mapBtn);
 
+    // --- docking scope (appears when a target port is within range) ---
+    this.dkName = h('span', { class: 'accent', text: '' });
+    const num = (label: string) => {
+      const v = h('span', { class: 'v', text: '—' });
+      return { row: h('div', { class: 'row' }, h('span', { class: 'k', text: label }), v), v };
+    };
+    const nDist = num('Range');
+    const nClose = num('Closing');
+    const nLat = num('Offset');
+    const nAng = num('Align');
+    this.dkDist = nDist.v;
+    this.dkClose = nClose.v;
+    this.dkLat = nLat.v;
+    this.dkAng = nAng.v;
+    const scope = h('div', { class: 'dk-scope', html: SCOPE_SVG });
+    this.dkDot = scope.querySelector('.dk-dot') as SVGCircleElement;
+    this.dkVel = scope.querySelector('.dk-vel') as SVGLineElement;
+    this.dkAlignBtn = h('button', { class: 'btn small', text: 'Align to port', title: 'SAS holds our docking port facing the target port', onClick: () => actions.toggleAlign() });
+    this.dkCamBtn = h('button', { class: 'btn small', text: 'Port cam', title: 'View out of the docking port (also V)', onClick: () => actions.toggleDockCam() });
+    this.dockCard = h('div', { class: 'dockcard card pe' },
+      h('div', { class: 'card-h' }, h('span', { text: 'Docking' }), this.dkName),
+      h('div', { class: 'dk-body' }, scope, h('div', { class: 'dk-nums' }, nDist.row, nClose.row, nLat.row, nAng.row)),
+      h('div', { class: 'dk-btns' }, this.dkAlignBtn, this.dkCamBtn),
+    );
+    this.root.appendChild(this.dockCard);
+
     this.toast = h('div', { class: 'toast' });
     this.root.appendChild(this.toast);
     this.warnBanner = h('div', { class: 'warnbanner' });
@@ -377,6 +456,9 @@ export class FlightHUD {
       ['Left slider', 'Throttle (MAX / CUT buttons at the ends)'],
       ['Right stick', 'Pitch and yaw · ROLL buttons above it'],
       ['STAGE', 'Launch / activate the next stage'],
+      ['RCS (above STAGE)', 'Left thumb becomes a translation stick · FWD / AFT move along the nose'],
+      ['TARGET · ALIGN · PORT CAM', 'Pick a vessel · hold our port facing its port · look out of the port'],
+      ['UNDOCK · SWITCH', 'Release a docked module · fly another vessel'],
       ['Drag · pinch', 'Rotate · zoom the camera'],
       ['Map ◎ then tap an orbit', 'Add a maneuver node there'],
       ['Chart / chip icons', 'Telemetry · flight computer (autopilot, burns)'],
@@ -395,7 +477,7 @@ export class FlightHUD {
       [', / .', 'Time warp down / up'],
       ['/', 'Stop warp'],
       ['M', 'Map view'],
-      ['V', 'Cycle camera (chase / tower / free)'],
+      ['V', 'Cycle camera (chase / tower / free / docking port)'],
       ['Mouse drag / wheel', 'Rotate / zoom camera'],
       ['N (map)', 'Add maneuver node at cursor'],
       ['Click a label (map)', 'Target that vessel · click again to fly it'],
@@ -546,10 +628,48 @@ export class FlightHUD {
     if (r.v.className !== want) r.v.className = want;
   }
 
+  /** Docking scope: the target port's position across our port's view, moved every frame. */
+  private updateDockScope(d: DockView | null): void {
+    const show = !!d;
+    if (show !== this.dockShown) {
+      this.dockShown = show;
+      this.dockCard.classList.toggle('show', show);
+      this.root.classList.toggle('docking', show);
+      this.dockTopDirty = true;
+    }
+    if (!d) return;
+    if (this.dockTopDirty && !this.root.classList.contains('touch')) {
+      // A layout read, but only when the card appears or the objectives change
+      this.dockTopDirty = false;
+      const top = this.missionCard.offsetTop + this.missionCard.offsetHeight + 10;
+      this.root.style.setProperty('--dk-top', `${top}px`);
+      this.root.style.setProperty('--dk-bottom', `${top + this.dockCard.offsetHeight}px`);
+    }
+    const lat = Math.hypot(d.x, d.y);
+    const k = lat > 1e-6 ? scopeScale(lat) / lat : 0;
+    const px = d.x * k;
+    const py = -d.y * k;
+    this.dkDot.setAttribute('cx', px.toFixed(1));
+    this.dkDot.setAttribute('cy', py.toFixed(1));
+    // Drift line: where the dot is heading (0.1 m/s → 15 px)
+    const vl = Math.hypot(d.vx, d.vy);
+    const kv = vl > 1e-6 ? Math.min(40, vl * 150) / vl : 0;
+    this.dkVel.setAttribute('x1', px.toFixed(1));
+    this.dkVel.setAttribute('y1', py.toFixed(1));
+    this.dkVel.setAttribute('x2', (px + d.vx * kv).toFixed(1));
+    this.dkVel.setAttribute('y2', (py - d.vy * kv).toFixed(1));
+    const good = lat < DOCK_CAPTURE_DISTANCE && d.capture;
+    if (good !== this.dockGood) {
+      this.dockGood = good;
+      this.dockCard.classList.toggle('good', good);
+    }
+  }
+
   /** Per-frame update. */
   update(sim: FlightSim, extra: HudExtra, dt: number): void {
     const v = sim.active;
     this.updateNavball(sim, v, extra.navballSize);
+    this.updateDockScope(extra.dock);
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) this.toast.classList.remove('show');
@@ -651,6 +771,7 @@ export class FlightHUD {
     const objKey = extra.objectives.map((o) => o.state + o.text).join('|');
     if (objKey !== this.lastObjKey) {
       this.lastObjKey = objKey;
+      this.dockTopDirty = true;
       clear(this.objList);
       for (const o of extra.objectives) {
         this.objList.appendChild(
@@ -735,7 +856,7 @@ export class FlightHUD {
     const apOn = sim.autopilot.mode !== 'off';
     for (const [m, b] of this.sasBtns) {
       b.classList.toggle('on', v.controls.sas && !apOn && v.controls.sasMode === m);
-      const disabled = (m === 'maneuver' && !sim.nodes.length) || ((m === 'target' || m === 'anti-target') && !sim.target);
+      const disabled = (m === 'maneuver' && !sim.nodes.length) || ((m === 'target' || m === 'anti-target') && !sim.target) || (m === 'port' && !sim.dock.valid);
       b.classList.toggle('disabled', disabled);
     }
 
@@ -844,6 +965,21 @@ export class FlightHUD {
     this.rcsBtn.classList.toggle('active', extra.rcs);
     this.undockBtn.style.display = extra.docked ? '' : 'none';
     this.switchBtn.style.display = extra.vessels > 1 ? '' : 'none';
+
+    // Docking numbers
+    const dk = extra.dock;
+    if (dk) {
+      setText(this.dkName, dk.target);
+      setText(this.dkDist, dk.distance < 100 ? `${dk.distance.toFixed(2)} m` : formatDistance(dk.distance));
+      setText(this.dkClose, `${dk.closing.toFixed(2)} m/s`);
+      this.dkClose.className = `v${dk.closing > DOCK_MAX_SPEED ? ' bad' : dk.closing < -0.02 ? ' warn' : dk.closing > 0.02 ? ' good' : ''}`;
+      setText(this.dkLat, `${dk.lateral.toFixed(2)} m`);
+      this.dkLat.className = `v${dk.lateral < DOCK_CAPTURE_DISTANCE ? ' good' : ''}`;
+      setText(this.dkAng, `${dk.angleDeg.toFixed(1)}°`);
+      this.dkAng.className = `v${dk.angleDeg < 15 ? ' good' : ' warn'}`;
+      this.dkAlignBtn.classList.toggle('active', dk.align);
+      this.dkCamBtn.classList.toggle('active', dk.dockCam);
+    }
 
     // Target
     const t = extra.target;

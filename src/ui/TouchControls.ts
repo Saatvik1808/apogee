@@ -13,6 +13,13 @@
  *    hold-buttons, since it is needed far less often.
  *  • STAGE — a large button in the corner, with a short cooldown so a nervous
  *    double-tap can't throw away a stage.
+ *  • RCS MODE — for docking the left thumb trades the throttle for a second
+ *    stick that TRANSLATES the ship (left/right, up/down) with FWD/AFT buttons
+ *    along the nose, while the right stick keeps rotating it. That is exactly the
+ *    Apollo arrangement: translation controller in the left hand, rotation
+ *    controller in the right.
+ *  • OPS COLUMN — context buttons above STAGE (RCS, target, port alignment,
+ *    port camera, undock, switch vessel) that only appear when they can act.
  *
  * Each control captures its own pointer (setPointerCapture), so the two thumbs
  * work independently and a finger sliding off a control keeps controlling it.
@@ -42,6 +49,28 @@ export interface TouchActions {
   pause(): void;
   togglePanel(p: 'telemetry' | 'computer'): void;
   setPhotoMode(on: boolean): void;
+  toggleRcs(): void;
+  cycleTarget(): void;
+  toggleAlign(): void;
+  toggleDockCam(): void;
+  undock(): void;
+  switchVessel(): void;
+}
+
+/** What the ops column can offer this frame (set by the flight state). */
+export interface TouchOps {
+  /** The vessel carries RCS thrusters / they are armed. */
+  rcsAvailable: boolean;
+  rcs: boolean;
+  /** Other vessels are around to target. */
+  targets: boolean;
+  /** A compatible docking port of the target is in range. */
+  dock: boolean;
+  /** Port alignment (SAS) / port camera active. */
+  align: boolean;
+  dockCam: boolean;
+  docked: boolean;
+  canSwitch: boolean;
 }
 
 const I = {
@@ -65,7 +94,20 @@ export class TouchControls {
   stickY = 0;
   /** Roll button output, −1..1. */
   roll = 0;
+  /** RCS translation in the pilot frame, −1..1: right, up, forward. */
+  tx = 0;
+  tu = 0;
+  tf = 0;
   sensitivity = 1;
+  private readonly thcBase: HTMLDivElement;
+  private readonly thcKnob: HTMLDivElement;
+  private readonly thcCut: HTMLButtonElement;
+  private thcPointer = -1;
+  private fwdHeld = false;
+  private aftHeld = false;
+  private readonly opsBtns: Record<'rcs' | 'target' | 'align' | 'cam' | 'undock' | 'switch', HTMLButtonElement>;
+  private opsMask = -1;
+  private thrHot: boolean | null = null;
   private readonly platform: Platform;
   private readonly actions: TouchActions;
   private readonly thrTrack: HTMLDivElement;
@@ -119,6 +161,83 @@ export class TouchControls {
     const thrBtn = (label: string, v: number, cls: string) =>
       h('button', { class: `tc-btn tc-thr-btn ${cls}`, text: label, onPointerDown: (e) => (e.preventDefault(), this.actions.setThrottle(v), this.platform.haptic('light')) });
     this.root.appendChild(h('div', { class: 'tc-throttle' }, thrBtn('MAX', 1, 'max'), this.thrTrack, this.thrVal, thrBtn('CUT', 0, 'cut')));
+
+    // ------------------------------------------- RCS translation (left thumb)
+    this.thcKnob = h('div', { class: 'tc-knob tc-knob-t' });
+    this.thcBase = h('div', { class: 'tc-tstick' }, h('div', { class: 'tc-stick-cross' }), h('span', { class: 'tc-tstick-l', text: 'TRANSLATE' }), this.thcKnob);
+    const moveThc = (e: PointerEvent) => {
+      const r = this.thcBase.getBoundingClientRect();
+      const R = r.width / 2;
+      let dx = (e.clientX - (r.left + R)) / R;
+      let dy = (e.clientY - (r.top + R)) / R;
+      const m = Math.hypot(dx, dy);
+      if (m > 1) {
+        dx /= m;
+        dy /= m;
+      }
+      this.thcKnob.style.transform = `translate(${dx * R * 0.62}px, ${dy * R * 0.62}px)`;
+      this.tx = this.curve(dx);
+      // Screen up = translate up (dorsal)
+      this.tu = -this.curve(dy);
+    };
+    this.thcBase.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.thcPointer = e.pointerId;
+      capture(this.thcBase, e.pointerId);
+      this.thcBase.classList.add('active');
+      moveThc(e);
+    });
+    this.thcBase.addEventListener('pointermove', (e) => {
+      if (e.pointerId === this.thcPointer) moveThc(e);
+    });
+    const thcEnd = (e: PointerEvent) => {
+      if (e.pointerId !== this.thcPointer) return;
+      this.thcPointer = -1;
+      this.tx = this.tu = 0;
+      this.thcKnob.style.transform = '';
+      this.thcBase.classList.remove('active');
+    };
+    this.thcBase.addEventListener('pointerup', thcEnd);
+    this.thcBase.addEventListener('pointercancel', thcEnd);
+    const holdBtn = (label: string, set: (on: boolean) => void) => {
+      const b = h('button', { class: 'tc-btn tc-thc-btn', text: label });
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        capture(b, e.pointerId);
+        set(true);
+        b.classList.add('held');
+      });
+      const up = () => {
+        set(false);
+        b.classList.remove('held');
+      };
+      b.addEventListener('pointerup', up);
+      b.addEventListener('pointercancel', up);
+      return b;
+    };
+    const fwd = holdBtn('FWD ▲', (on) => ((this.fwdHeld = on), this.syncFore()));
+    const aft = holdBtn('AFT ▼', (on) => ((this.aftHeld = on), this.syncFore()));
+    // The throttle slider is hidden in RCS mode: keep a way to cut a running engine
+    this.thcCut = h('button', { class: 'tc-btn tc-thc-cut', text: 'CUT ENGINE', onPointerDown: (e) => (e.preventDefault(), this.actions.setThrottle(0), this.platform.haptic('light')) });
+    this.root.appendChild(h('div', { class: 'tc-thc' }, this.thcCut, fwd, this.thcBase, aft));
+
+    // ------------------------------------------------ ops column (above STAGE)
+    const opsBtn = (label: string, title: string, fn: () => void) =>
+      h('button', { class: 'tc-btn tc-op', text: label, title, onClick: () => (this.platform.haptic('tick'), fn()) });
+    this.opsBtns = {
+      rcs: opsBtn('RCS', 'Arm the RCS thrusters: the left stick translates the ship', () => this.actions.toggleRcs()),
+      target: opsBtn('TARGET', 'Cycle the navigation target', () => this.actions.cycleTarget()),
+      align: opsBtn('ALIGN', 'Hold our docking port facing the target port', () => this.actions.toggleAlign()),
+      cam: opsBtn('PORT CAM', 'View out of the docking port', () => this.actions.toggleDockCam()),
+      undock: opsBtn('UNDOCK', 'Release the docked module', () => this.actions.undock()),
+      switch: opsBtn('SWITCH', 'Fly another vessel of this flight', () => this.actions.switchVessel()),
+    };
+    const ops = h('div', { class: 'tc-ops' });
+    for (const k of ['rcs', 'target', 'align', 'cam', 'undock', 'switch'] as const) {
+      this.opsBtns[k].style.display = 'none';
+      ops.appendChild(this.opsBtns[k]);
+    }
+    this.root.appendChild(ops);
 
     // ---------------------------------------------------------------- joystick
     this.stickKnob = h('div', { class: 'tc-knob' });
@@ -217,6 +336,18 @@ export class TouchControls {
     return Math.sign(v) * Math.min(1, Math.pow(t, 1.6) * this.sensitivity);
   }
 
+  private syncFore(): void {
+    this.tf = (this.fwdHeld ? 1 : 0) - (this.aftHeld ? 1 : 0);
+  }
+
+  private resetTranslation(): void {
+    this.tx = this.tu = this.tf = 0;
+    this.fwdHeld = this.aftHeld = false;
+    this.thcPointer = -1;
+    this.thcKnob.style.transform = '';
+    this.thcBase.classList.remove('active');
+  }
+
   setPhoto(on: boolean): void {
     this.photo = on;
     this.root.classList.toggle('photo', on);
@@ -231,11 +362,42 @@ export class TouchControls {
     this.root.style.display = v ? '' : 'none';
     if (!v) {
       this.stickX = this.stickY = this.roll = 0;
+      this.resetTranslation();
+    }
+  }
+
+  /** Show only the ops buttons that can act, and switch the left thumb between throttle and RCS. */
+  private updateOps(o: TouchOps, throttle: number): void {
+    const rcsMode = o.rcsAvailable && o.rcs;
+    const mask =
+      (o.rcsAvailable ? 1 : 0) | (rcsMode ? 2 : 0) | (o.targets ? 4 : 0) | (o.dock ? 8 : 0) | (o.align ? 16 : 0) | (o.dockCam ? 32 : 0) | (o.docked ? 64 : 0) | (o.canSwitch ? 128 : 0);
+    if (mask !== this.opsMask) {
+      const wasRcs = (this.opsMask & 2) !== 0;
+      this.opsMask = mask;
+      const b = this.opsBtns;
+      const show = (el: HTMLButtonElement, on: boolean) => (el.style.display = on ? '' : 'none');
+      show(b.rcs, o.rcsAvailable);
+      show(b.target, o.targets);
+      show(b.align, o.dock || o.align);
+      show(b.cam, o.dock || o.dockCam);
+      show(b.undock, o.docked);
+      show(b.switch, o.canSwitch);
+      b.rcs.classList.toggle('active', rcsMode);
+      b.align.classList.toggle('active', o.align);
+      b.cam.classList.toggle('active', o.dockCam);
+      this.root.classList.toggle('rcs', rcsMode);
+      if (wasRcs && !rcsMode) this.resetTranslation();
+    }
+    const hot = rcsMode && throttle > 0;
+    if (hot !== this.thrHot) {
+      this.thrHot = hot;
+      this.thcCut.classList.toggle('show', hot);
     }
   }
 
   /** Per-frame refresh of the widgets from the vessel state. */
-  update(dt: number, throttle: number, stageLabel: string, canStage: boolean, panels: { telemetry: boolean; computer: boolean }, mapMode: boolean): void {
+  update(dt: number, throttle: number, stageLabel: string, canStage: boolean, panels: { telemetry: boolean; computer: boolean }, mapMode: boolean, ops: TouchOps): void {
+    this.updateOps(ops, throttle);
     if (Math.abs(throttle - this.lastThrottle) > 1e-4) {
       // Haptic tick when the throttle reaches either end
       if (this.thrPointer >= 0 && ((throttle === 0 && this.lastThrottle > 0) || (throttle === 1 && this.lastThrottle < 1))) this.platform.haptic('tick');

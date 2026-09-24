@@ -22,7 +22,8 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 import { clamp, damp } from '../core/math';
 import type { CelestialBody } from '../physics/CelestialBody';
 
-export type CameraMode = 'chase' | 'tower' | 'free';
+/** 'dock': the view out of our docking port, for the final approach. */
+export type CameraMode = 'chase' | 'tower' | 'free' | 'dock';
 
 const _up = new Vector3();
 const _north = new Vector3();
@@ -91,6 +92,19 @@ export class FlightCamera {
     this.quaternion.setFromRotationMatrix(_m);
     // Zoom lens to keep the rocket framed
     this.fov = clamp((Math.atan2(90, d) * 360) / Math.PI, 3, 55);
+    this.applyShake(dt);
+  }
+
+  /**
+   * Docking-port camera: sits just in front of our port looking along its axis,
+   * screen-up along the vessel's dorsal side — the view through Apollo's
+   * docking window. `pos` is absolute; `fwd` and `up` are unit vectors.
+   */
+  updateDock(pos: Vector3, fwd: Vector3, up: Vector3, dt: number): void {
+    this.position.copy(pos);
+    _m.lookAt(ZERO, fwd, up);
+    this.quaternion.setFromRotationMatrix(_m);
+    this.fov += (62 - this.fov) * Math.min(1, dt * 4);
     this.applyShake(dt);
   }
 

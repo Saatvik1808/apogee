@@ -252,17 +252,104 @@
   opacity: 0.55;
 }
 
-/* Photo mode: only the exit button remains */
-.touch-ui.photo > * {
+/* ------------------------------------------- RCS translation (left thumb) */
+.tc-thc {
+  position: absolute;
+  left: var(--sl);
+  bottom: 14px;
+  width: 124px;
   display: none;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.touch-ui.rcs .tc-thc {
+  display: flex;
+}
+.touch-ui.rcs .tc-throttle {
+  display: none;
+}
+.tc-thc-btn {
+  height: 36px;
+  font-size: 12px;
+  color: #bff3d6;
+}
+.tc-thc-cut {
+  display: none;
+  height: 30px;
+  font-size: 11px;
+  color: var(--red);
+  border-color: rgba(255, 107, 107, 0.6);
+}
+.tc-thc-cut.show {
+  display: block;
+}
+.tc-tstick {
+  position: relative;
+  width: 124px;
+  height: 124px;
+  border-radius: 50%;
+  border: 1px solid rgba(111, 242, 164, 0.45);
+  background: radial-gradient(circle, rgba(111, 242, 164, 0.08), rgba(10, 14, 22, 0.55) 70%);
+  touch-action: none;
+}
+.tc-tstick.active {
+  border-color: var(--green);
+}
+.tc-tstick-l {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: rgba(111, 242, 164, 0.7);
+  pointer-events: none;
+}
+.tc-knob-t {
+  background: radial-gradient(circle at 35% 35%, #eafff2, #8fe0b4 60%, #3c8f63);
+}
+
+/* ------------------------------------------------ ops column (above STAGE) */
+.tc-ops {
+  position: absolute;
+  right: var(--sr);
+  bottom: 108px;
+  width: 80px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+}
+.tc-op {
+  height: 34px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.tc-op.active {
+  border-color: var(--green);
+  color: var(--green);
+  background: rgba(111, 242, 164, 0.16);
+}
+
+/* Photo mode: only the exit button remains (beats the mode-specific display rules) */
+.touch-ui.photo > *:not(.tc-photo-exit) {
+  display: none !important;
 }
 .touch-ui.photo > .tc-photo-exit {
   display: grid;
 }
 /* The map needs no steering; keep throttle and staging */
 .touch-ui.map-mode .tc-stick,
-.touch-ui.map-mode .tc-roll {
+.touch-ui.map-mode .tc-roll,
+.touch-ui.map-mode .tc-thc {
   display: none;
+}
+.touch-ui.rcs.map-mode .tc-throttle {
+  display: flex;
 }
 
 @media (max-height: 380px) {
@@ -282,5 +369,23 @@
   }
   .tc-throttle {
     width: 56px;
+  }
+  .tc-ops {
+    bottom: 98px;
+    width: 72px;
+  }
+  .tc-op {
+    height: 30px;
+  }
+  .tc-thc {
+    width: 112px;
+    gap: 5px;
+  }
+  .tc-tstick {
+    width: 112px;
+    height: 112px;
+  }
+  .tc-thc-btn {
+    height: 32px;
   }
 }

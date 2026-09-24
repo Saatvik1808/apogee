@@ -90,6 +90,14 @@ pitch/yaw, ROLL buttons above it · STAGE button · drag to rotate the camera, p
 icon bar: map, camera, telemetry, flight computer, photo mode, pause · in the map, tap an
 orbit to add a maneuver node · Back button opens the pause menu.
 
+Docking on a phone: the column above STAGE shows **RCS**, **TARGET**, **ALIGN**, **PORT CAM**,
+**UNDOCK** and **SWITCH** whenever they apply. RCS turns the left thumb into a translation
+stick (left/right, up/down) with **FWD / AFT** buttons along the nose, like Apollo's
+translation controller; ALIGN makes SAS hold your docking port facing the target's; PORT CAM
+looks out of the port, with a floodlight for the night side. The docking scope shows the
+target port's offset, range, closing speed and alignment — centre the dot, keep closing
+under 1 m/s, and the ports latch.
+
 **Flight (keyboard)**
 
 | Key             | Action                         | Key     | Action                          |
@@ -99,7 +107,7 @@ orbit to add a maneuver node · Back button opens the pause menu.
 | Q / E           | Roll                           | G       | Toggle landing legs             |
 | Shift / Ctrl    | Throttle up / down             | M       | Map view                        |
 | Z / X           | Full / cut throttle            | N       | Add maneuver node (map view)    |
-| , / .           | Time warp down / up            | V       | Cycle camera                    |
+| , / .           | Time warp down / up            | V       | Cycle camera (incl. port view)  |
 | /               | Stop time warp                 | P       | Pause                           |
 | F1              | Help                           | F2      | Hide the HUD                    |
 | Esc             | Pause menu                     | R       | Toggle RCS thrusters            |

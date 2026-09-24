@@ -112,6 +112,48 @@ export interface TargetInfo {
   caTime: number;
 }
 
+/**
+ * Final-approach geometry between our nearest free docking port and the target
+ * vessel's, in the PILOT FRAME of our port: forward along the port's axis, up
+ * roughly along the vessel's dorsal side, right = forward × up. That is the view
+ * out of the docking window, so "target is up and to the right" reads directly
+ * as "translate up and right".
+ */
+export interface DockingState {
+  valid: boolean;
+  own: FlightPart | null;
+  ownFace: 1 | -1;
+  target: FlightPart | null;
+  targetFace: 1 | -1;
+  /** Pilot-frame unit vectors (inertial). */
+  readonly fwd: Vector3;
+  readonly up: Vector3;
+  readonly right: Vector3;
+  /** Target port face relative to our port face: x right, y up, z forward (m). */
+  readonly offset: Vector3;
+  /** Target velocity relative to us in the same frame (m/s). */
+  readonly relVel: Vector3;
+  distance: number;
+  /** Rate the gap closes (m/s, negative when drifting apart). */
+  closing: number;
+  /** Offset across the approach axis (m). */
+  lateral: number;
+  /** Angle between our port axis and the reversed target port axis (rad). */
+  angle: number;
+  /** Nose direction (inertial) that turns our port to face the target port. */
+  readonly alignDir: Vector3;
+}
+
+/** Docking geometry is tracked inside this range (m). */
+const DOCKING_RANGE = 2_500;
+
+function isVesselTarget(t: CelestialBody | Vessel): t is Vessel {
+  return 'parts' in t;
+}
+const _qd = new Quaternion();
+const _nose = new Vector3();
+const _vrel = new Vector3();
+
 export class FlightSim {
   readonly system: SolarSystem;
   time: number;
@@ -128,6 +170,24 @@ export class FlightSim {
   target: CelestialBody | Vessel | null = null;
   /** Range, closing speed and predicted closest approach to a target vessel. */
   targetInfo: TargetInfo | null = null;
+  /** Port-to-port approach geometry when a target vessel is near. */
+  readonly dock: DockingState = {
+    valid: false,
+    own: null,
+    ownFace: 1,
+    target: null,
+    targetFace: 1,
+    fwd: new Vector3(),
+    up: new Vector3(),
+    right: new Vector3(),
+    offset: new Vector3(),
+    relVel: new Vector3(),
+    distance: 0,
+    closing: 0,
+    lateral: 0,
+    angle: 0,
+    alignDir: new Vector3(),
+  };
   warpIndex = 0;
   paused = false;
   /** Universal time of liftoff (NaN until launched). */
@@ -298,26 +358,32 @@ export class FlightSim {
     return next;
   }
 
+  // The target union is told apart structurally (a vessel has parts): robust even
+  // if a class is loaded twice (hot module reload, tests importing by another path)
   get targetBody(): CelestialBody | null {
-    return this.target instanceof CB ? this.target : null;
+    const t = this.target;
+    return t && !isVesselTarget(t) ? t : null;
   }
 
   get targetVessel(): Vessel | null {
-    return this.target instanceof Vessel ? this.target : null;
+    const t = this.target;
+    return t && isVesselTarget(t) ? t : null;
   }
 
   /** Absolute position of the current target; false when there is none. */
   targetPosition(out: Vector3): boolean {
-    if (!this.target) return false;
-    if (this.target instanceof Vessel) this.target.absolutePosition(out);
-    else out.copy(this.target.position);
+    const t = this.target;
+    if (!t) return false;
+    if (isVesselTarget(t)) t.absolutePosition(out);
+    else out.copy(t.position);
     return true;
   }
 
   targetVelocity(out: Vector3): boolean {
-    if (!this.target) return false;
-    if (this.target instanceof Vessel) this.target.absoluteVelocity(out);
-    else out.copy(this.target.velocity);
+    const t = this.target;
+    if (!t) return false;
+    if (isVesselTarget(t)) t.absoluteVelocity(out);
+    else out.copy(t.velocity);
     return true;
   }
 
@@ -351,6 +417,66 @@ export class FlightSim {
     info.relSpeed = _a.distanceTo(_b);
     if (recomputeCA || isNaN(info.caTime)) this.closestApproach(a, tv, info);
     this.targetInfo = info;
+  }
+
+  /**
+   * Pick the closest pair of compatible free ports (ours × the target's) and
+   * express their relative position, velocity and alignment in our port's
+   * pilot frame. Runs once per frame; allocation-free.
+   */
+  private updateDocking(): void {
+    const d = this.dock;
+    d.valid = false;
+    const a = this.active;
+    const tv = this.targetVessel;
+    if (!tv || tv.destroyed || a.destroyed || a.pinned || tv.body !== a.body) return;
+    if (this.targetInfo && this.targetInfo.distance > DOCKING_RANGE) return;
+    let best = Infinity;
+    for (const p of a.parts) {
+      const fa = a.freePortFace(p);
+      if (!fa) continue;
+      a.dockFacePose(p, fa, _dockPosA, _dockDirA);
+      for (const q of tv.parts) {
+        const fb = tv.freePortFace(q);
+        if (!fb || Math.abs(p.stats.diameterTop - q.stats.diameterTop) > 0.01) continue;
+        tv.dockFacePose(q, fb, _dockPosB, _dockDirB);
+        const dist = _dockPosA.distanceTo(_dockPosB);
+        if (dist < best) {
+          best = dist;
+          d.own = p;
+          d.ownFace = fa;
+          d.target = q;
+          d.targetFace = fb;
+        }
+      }
+    }
+    if (!isFinite(best) || !d.own || !d.target) return;
+    a.dockFacePose(d.own, d.ownFace, _dockPosA, _dockDirA);
+    tv.dockFacePose(d.target, d.targetFace, _dockPosB, _dockDirB);
+    // Pilot frame: forward = our port axis, up = the vessel's dorsal side made
+    // perpendicular to it (its right side for a port pointing along dorsal)
+    d.fwd.copy(_dockDirA);
+    d.up.set(0, 0, 1).applyQuaternion(a.q);
+    d.up.addScaledVector(d.fwd, -d.up.dot(d.fwd));
+    if (d.up.lengthSq() < 1e-6) {
+      d.up.set(1, 0, 0).applyQuaternion(a.q);
+      d.up.addScaledVector(d.fwd, -d.up.dot(d.fwd));
+    }
+    d.up.normalize();
+    d.right.crossVectors(d.fwd, d.up);
+    _t.copy(_dockPosB).sub(_dockPosA);
+    d.offset.set(_t.dot(d.right), _t.dot(d.up), _t.dot(d.fwd));
+    _vrel.copy(tv.v).sub(a.v);
+    d.relVel.set(_vrel.dot(d.right), _vrel.dot(d.up), _vrel.dot(d.fwd));
+    d.distance = _t.length();
+    d.closing = d.distance > 1e-6 ? -_vrel.dot(_t) / d.distance : 0;
+    d.lateral = Math.hypot(d.offset.x, d.offset.y);
+    d.angle = Math.acos(Math.max(-1, Math.min(1, -d.fwd.dot(_dockDirB))));
+    // The rotation that would turn our port axis onto the reversed target axis,
+    // applied to the nose: for ports on the vessel's axis this is exactly ±that axis
+    _qd.setFromUnitVectors(d.fwd, _t.copy(_dockDirB).negate());
+    d.alignDir.copy(a.forward(_nose)).applyQuaternion(_qd).normalize();
+    d.valid = true;
   }
 
   /**
@@ -525,6 +651,7 @@ export class FlightSim {
     const predicted = this.updatePrediction(realDt);
     this.updateNodes();
     this.updateTargetInfo(predicted);
+    this.updateDocking();
     // Drain physics events
     if (this.physics.events.length) {
       this.events.push(...this.physics.events);
@@ -724,7 +851,10 @@ export class FlightSim {
   sasTargetDirection(v: Vessel, out: Vector3): Vector3 | null {
     const c = v.controls;
     if (!c.sas) return null;
-    const vel = c.speedMode === 'surface' ? v.surfaceVelocity : v.v;
+    let vel: Vector3 = c.speedMode === 'surface' ? v.surfaceVelocity : v.v;
+    // Target mode: prograde/retrograde are relative to the target, as the navball shows
+    // them — pointing target-retrograde and burning kills the relative velocity
+    if (c.speedMode === 'target' && v === this.active && this.targetVelocity(_b)) vel = _vrel.copy(v.v).add(v.body.velocity).sub(_b);
     const spd = vel.length();
     switch (c.sasMode) {
       case 'stability':
@@ -755,6 +885,8 @@ export class FlightSim {
         if (!n || n.remaining.lengthSq() < 1e-6) return null;
         return out.copy(n.remaining).normalize();
       }
+      case 'port':
+        return v === this.active && this.dock.valid ? out.copy(this.dock.alignDir) : null;
     }
     return null;
   }
