@@ -18,6 +18,7 @@ import { getLaunchSite } from '../src/world/LaunchSites';
 import { planCircularize, planCorrection, planMoonTransfer, planReturnToEarth } from '../src/sim/Planner';
 import { lunarLaunchWindow } from '../src/game/LaunchWindow';
 import { analyzeStages } from '../src/parts/DeltaV';
+import { burnLeadTime } from '../src/sim/Maneuver';
 
 const out: string[] = [];
 const log = (s: string) => out.push(s);
@@ -47,8 +48,9 @@ function state(sim: FlightSim, label: string): void {
 
 function executeNode(sim: FlightSim, trace = false): void {
   const n = sim.nodes[0]!;
+  const lead = burnLeadTime(sim.active, n.remaining.length());
   sim.setWarpIndex(11);
-  run(sim, 20000, () => sim.warpIndex === 0 || sim.time > n.time - 120);
+  run(sim, 20000, () => sim.warpIndex === 0 || sim.time > n.time - lead);
   sim.stopWarp();
   sim.autopilot.engage('node', sim);
   let last = 0;
@@ -88,6 +90,7 @@ it.skipIf(!env?.env.APOGEE_LONG)('flies a full lunar landing mission and returns
   const sim = new FlightSim(sys, TEMPLATES.find((t) => t.id === 'colossus')!.build(), getLaunchSite('cape'), t0);
   sim.autopilot.ascent.targetAltitude = 200_000;
   sim.autopilot.ascent.heading = win.heading;
+  sim.autopilot.ascent.planeNormal = win.normal;
   sim.autopilot.engage('ascent', sim);
   run(sim, 1500, () => sim.autopilot.mode === 'off');
   run(sim, 2);

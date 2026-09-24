@@ -17,7 +17,7 @@
  * interactive trajectory planning
  */
 import { LAYER_TRANSPARENT } from '../render/post/SharedUniforms';
-import { Vector2, Vector3 } from 'three';
+import { DynamicDrawUsage, Vector2, Vector3, type InstancedInterleavedBuffer, type InterleavedBufferAttribute } from 'three';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -25,7 +25,7 @@ import { formatDistance, formatDuration } from '../core/math';
 import type { CelestialBody } from '../physics/CelestialBody';
 import type { TrajectoryPatch } from '../physics/Trajectory';
 import type { FlightSim } from '../sim/FlightSim';
-import { estimateBurnTime, type ManeuverNode } from '../sim/Maneuver';
+import { burnLeadTime, estimateBurnTime, type ManeuverNode } from '../sim/Maneuver';
 import { h, setText, clear } from '../ui/dom';
 import type { GameContext } from './GameContext';
 import type { MapCamera } from './FlightCamera';
@@ -35,17 +35,24 @@ const NODE_COLORS = [0xfff1a8, 0xffd27a, 0xffa3e0, 0xa3ffd0, 0xffb3b3];
 const N_SAMPLES = 360;
 const _p = new Vector3();
 const _v = new Vector3();
+const _v2 = new Vector3();
 const _scr = new Vector3();
 
 interface LineSlot {
   line: Line2;
   geo: LineGeometry;
   mat: LineMaterial;
+  /** GPU segment buffer (start xyz, end xyz per segment), sized for N_SAMPLES once. */
+  seg: InstancedInterleavedBuffer;
+  /** Cumulative distances for dashed lines (null when not dashed). */
+  dist: InstancedInterleavedBuffer | null;
   body: CelestialBody | null;
   /** Sampled positions relative to the body (float64 source for picking). */
   pts: Float64Array;
   times: Float64Array;
   count: number;
+  /** Predictor version the samples were taken from (−1: none). */
+  stamp: number;
 }
 
 export class MapView {
@@ -88,7 +95,7 @@ export class MapView {
       );
     this.nodePanel = h(
       'div',
-      { class: 'card pe', style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:calc(20vh + 90px);padding:10px 12px;display:none;pointer-events:auto;min-width:420px' },
+      { class: 'card pe map-node-panel', style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:calc(20vh + 90px);padding:10px 12px;display:none;pointer-events:auto;min-width:420px' },
       h('div', { class: 'card-h', style: 'margin:-10px -12px 8px' }, h('span', { text: 'Maneuver node' }), h('span', { class: 'accent', text: 'PLAN' })),
       this.nodeInfo,
       row('Prograde', 'prograde', '#d8f53a'),
@@ -107,25 +114,33 @@ export class MapView {
       ),
       h('div', { style: 'display:flex;gap:6px;margin-top:10px' },
         h('button', { class: 'btn small primary', style: 'flex:1', text: 'Execute (autopilot)', onClick: () => this.sim.autopilot.engage('node', this.sim) }),
-        h('button', { class: 'btn small', text: 'Warp to', onClick: () => this.selected && (this.warpTarget = this.selected.time - Math.max(60, (estimateBurnTime(this.sim.active, this.selected.remaining.length()) || 0) / 2 + 45)) }),
+        h('button', { class: 'btn small', text: 'Warp to', onClick: () => this.selected && (this.warpTarget = this.selected.time - burnLeadTime(this.sim.active, this.selected.remaining.length())) }),
         h('button', { class: 'btn small', text: 'Delete', onClick: () => this.deleteSelectedNode() }),
       ),
     );
     this.overlay.appendChild(this.nodePanel);
     this.overlay.appendChild(
-      h('div', { class: 'card', style: 'position:absolute;left:50%;transform:translateX(-50%);top:84px;padding:6px 12px;font-size:12px;color:var(--text-dim);pointer-events:none' },
-        'MAP  ·  drag to orbit, wheel to zoom  ·  N: add maneuver node at cursor  ·  Tab: change focus  ·  M: back to flight'),
+      h('div', { class: 'card map-hint', style: 'position:absolute;left:50%;transform:translateX(-50%);top:84px;padding:6px 12px;font-size:12px;color:var(--text-dim);pointer-events:none' },
+        ctx.platform.touch
+          ? 'Tap an orbit to plan a burn · drag to rotate · pinch to zoom'
+          : 'MAP  ·  drag to orbit, wheel to zoom  ·  N: add maneuver node at cursor  ·  Tab: change focus  ·  M: back to flight'),
     );
     ctx.ui.appendChild(this.overlay);
-    ctx.input.onKey((code) => {
+    this.unbindKey = ctx.input.onKey((code) => {
       if (!this.visible) return;
       if (code === 'Tab') this.cycleFocus();
     });
   }
 
+  /** Key listener removal — without it every flight's MapView (and its whole FlightSim) stayed reachable from the global input. */
+  private readonly unbindKey: () => void;
+
   private makeSlot(color: number, dashed: boolean, width: number): LineSlot {
     const geo = new LineGeometry();
-    geo.setPositions([0, 0, 0, 1, 1, 1]);
+    // Allocate the GPU buffers once at full capacity; every frame only rewrites
+    // their contents (creating new geometry per frame would re-upload 11 line
+    // buffers to the GPU 60 times a second)
+    geo.setPositions(new Float32Array(N_SAMPLES * 3));
     const mat = new LineMaterial({ color, linewidth: width, transparent: true, opacity: 0.95, dashed, dashSize: 0.02, gapSize: 0.015, depthWrite: false, worldUnits: false });
     const line = new Line2(geo, mat);
     line.frustumCulled = false;
@@ -133,13 +148,28 @@ export class MapView {
     line.renderOrder = 20;
     line.layers.set(LAYER_TRANSPARENT);
     this.ctx.space.scene.add(line);
-    return { line, geo, mat, body: null, pts: new Float64Array(N_SAMPLES * 3), times: new Float64Array(N_SAMPLES), count: 0 };
+    const seg = (geo.attributes.instanceStart as InterleavedBufferAttribute).data as InstancedInterleavedBuffer;
+    seg.setUsage(DynamicDrawUsage);
+    let dist: InstancedInterleavedBuffer | null = null;
+    if (dashed) {
+      line.computeLineDistances();
+      dist = (geo.attributes.instanceDistanceStart as InterleavedBufferAttribute).data as InstancedInterleavedBuffer;
+      dist.setUsage(DynamicDrawUsage);
+    }
+    return { line, geo, mat, seg, dist, body: null, pts: new Float64Array(N_SAMPLES * 3), times: new Float64Array(N_SAMPLES), count: 0, stamp: -1 };
+  }
+
+  private allSlots: LineSlot[] | null = null;
+
+  private get slotList(): LineSlot[] {
+    if (!this.allSlots) this.allSlots = [...this.slots, ...this.nodeSlots, this.moonOrbit];
+    return this.allSlots;
   }
 
   setVisible(v: boolean): void {
     this.visible = v;
     this.overlay.style.display = v ? '' : 'none';
-    for (const s of [...this.slots, ...this.nodeSlots, this.moonOrbit]) s.line.visible = v && s.count > 1;
+    for (const s of this.slotList) s.line.visible = v && s.count > 1;
     if (!v) this.selected = null;
   }
 
@@ -157,9 +187,7 @@ export class MapView {
 
   updateCamera(cam: MapCamera, dt: number, dx: number, dy: number, wheel: number): void {
     const b = this.focusBody();
-    let focusAbs: Vector3;
-    if (this.focus === 'vessel') focusAbs = this.sim.active.absolutePosition(new Vector3());
-    else focusAbs = b.position.clone();
+    const focusAbs = this.focus === 'vessel' ? this.sim.active.absolutePosition(_v2) : _v2.copy(b.position);
     if (b !== this.lastFocusBody && this.focus !== 'vessel') {
       cam.targetDistance = Math.max(cam.targetDistance, b.radius * 3.2);
       if (b.id === 'sun') cam.targetDistance = 4e11;
@@ -225,15 +253,52 @@ export class MapView {
       slot.line.visible = false;
       return;
     }
-    // Positions relative to the body; the line object sits at body − camera
-    const arr = new Float32Array(slot.count * 3);
-    for (let i = 0; i < slot.count * 3; i++) arr[i] = slot.pts[i]!;
-    slot.geo.dispose();
-    const g = new LineGeometry();
-    g.setPositions(arr);
-    slot.line.geometry = g;
-    slot.geo = g;
-    slot.line.computeLineDistances();
+    // Positions relative to the body; the line object sits at body − camera.
+    // Segment i runs from point i to point i+1: rewrite the interleaved buffer in
+    // place (start xyz, end xyz) and draw only the segments in use.
+    const n = Math.min(slot.count, N_SAMPLES);
+    const pts = slot.pts;
+    const arr = slot.seg.array as Float32Array;
+    for (let i = 0; i < n - 1; i++) {
+      const o = i * 6;
+      const s = i * 3;
+      arr[o] = pts[s]!;
+      arr[o + 1] = pts[s + 1]!;
+      arr[o + 2] = pts[s + 2]!;
+      arr[o + 3] = pts[s + 3]!;
+      arr[o + 4] = pts[s + 4]!;
+      arr[o + 5] = pts[s + 5]!;
+    }
+    slot.seg.clearUpdateRanges();
+    slot.seg.addUpdateRange(0, (n - 1) * 6);
+    slot.seg.needsUpdate = true;
+    if (slot.dist) {
+      // Dashes need the cumulative length along the line (same maths as Line2.computeLineDistances)
+      const d = slot.dist.array as Float32Array;
+      let acc = 0;
+      for (let i = 0; i < n - 1; i++) {
+        const s = i * 3;
+        const dx = pts[s + 3]! - pts[s]!;
+        const dy = pts[s + 4]! - pts[s + 1]!;
+        const dz = pts[s + 5]! - pts[s + 2]!;
+        d[i * 2] = acc;
+        acc += Math.sqrt(dx * dx + dy * dy + dz * dz);
+        d[i * 2 + 1] = acc;
+      }
+      slot.dist.clearUpdateRanges();
+      slot.dist.addUpdateRange(0, (n - 1) * 2);
+      slot.dist.needsUpdate = true;
+    }
+    slot.geo.instanceCount = n - 1;
+    this.placeSlot(slot, camAbs);
+  }
+
+  /** Per-frame: the line object sits at body − camera (floating origin). */
+  private placeSlot(slot: LineSlot, camAbs: Vector3): void {
+    if (!slot.body || slot.count < 2) {
+      slot.line.visible = false;
+      return;
+    }
     slot.line.position.copy(slot.body.position).sub(camAbs);
     slot.line.visible = this.visible;
   }
@@ -244,8 +309,10 @@ export class MapView {
     this.rebuildTimer -= dt;
     const w = window.innerWidth;
     const hgt = window.innerHeight;
-    this.resolution.set(w, hgt);
-    for (const s of [...this.slots, ...this.nodeSlots, this.moonOrbit]) s.mat.resolution.copy(this.resolution);
+    if (w !== this.resolution.x || hgt !== this.resolution.y) {
+      this.resolution.set(w, hgt);
+      for (const s of this.slotList) s.mat.resolution.copy(this.resolution);
+    }
     if (!this.selected && this.sim.nodes.length) this.selected = this.sim.nodes[0]!;
     if (this.selected && !this.sim.nodes.includes(this.selected)) this.selected = this.sim.nodes[0] ?? null;
     this.nodePanel.style.display = this.selected ? '' : 'none';
@@ -263,7 +330,12 @@ export class MapView {
     }
   }
 
-  /** Rebuild line geometry and place markers; call before rendering. */
+  /**
+   * Rebuild line geometry and place markers; call before rendering. Orbit lines
+   * are only re-sampled when the predictor produced a new prediction (its
+   * `version` changes) — every frame they are merely re-positioned relative to
+   * the camera.
+   */
   render(camAbs: Vector3): void {
     if (!this.visible) return;
     const sim = this.sim;
@@ -271,10 +343,14 @@ export class MapView {
     for (let i = 0; i < this.slots.length; i++) {
       const slot = this.slots[i]!;
       if (i < pred.count && !sim.active.pinned) {
-        this.samplePatch(pred.patches[i]!, slot);
-        this.uploadSlot(slot, camAbs);
+        if (slot.stamp !== pred.version) {
+          this.samplePatch(pred.patches[i]!, slot);
+          this.uploadSlot(slot, camAbs);
+          slot.stamp = pred.version;
+        } else this.placeSlot(slot, camAbs);
       } else {
         slot.count = 0;
+        slot.stamp = -1;
         slot.line.visible = false;
       }
     }
@@ -282,27 +358,33 @@ export class MapView {
     for (let i = 0; i < this.nodeSlots.length; i++) {
       const slot = this.nodeSlots[i]!;
       if (i < np.count && sim.nodes.length) {
-        this.samplePatch(np.patches[i]!, slot);
-        this.uploadSlot(slot, camAbs);
+        if (slot.stamp !== np.version) {
+          this.samplePatch(np.patches[i]!, slot);
+          this.uploadSlot(slot, camAbs);
+          slot.stamp = np.version;
+        } else this.placeSlot(slot, camAbs);
       } else {
         slot.count = 0;
+        slot.stamp = -1;
         slot.line.visible = false;
       }
     }
-    // Moon's orbit
+    // Moon's orbit: fixed elements, sampled once
     const moon = this.ctx.system.moon;
     if (moon.orbit) {
       const o = moon.orbit;
       const slot = this.moonOrbit;
-      slot.body = this.ctx.system.earth;
-      for (let i = 0; i < N_SAMPLES; i++) {
-        o.positionAtTrueAnomaly((i / (N_SAMPLES - 1)) * Math.PI * 2, _p);
-        slot.pts[i * 3] = _p.x;
-        slot.pts[i * 3 + 1] = _p.y;
-        slot.pts[i * 3 + 2] = _p.z;
-      }
-      slot.count = N_SAMPLES;
-      this.uploadSlot(slot, camAbs);
+      if (slot.count === 0 || slot.body !== this.ctx.system.earth) {
+        slot.body = this.ctx.system.earth;
+        for (let i = 0; i < N_SAMPLES; i++) {
+          o.positionAtTrueAnomaly((i / (N_SAMPLES - 1)) * Math.PI * 2, _p);
+          slot.pts[i * 3] = _p.x;
+          slot.pts[i * 3 + 1] = _p.y;
+          slot.pts[i * 3 + 2] = _p.z;
+        }
+        slot.count = N_SAMPLES;
+        this.uploadSlot(slot, camAbs);
+      } else this.placeSlot(slot, camAbs);
     }
     this.placeMarkers(camAbs);
   }
@@ -341,10 +423,12 @@ export class MapView {
     const sim = this.sim;
     const sys = this.ctx.system;
     for (const b of sys.ordered) {
-      this.label(`body-${b.id}`, b.name.toUpperCase(), 'body', _v.copy(b.position).add(new Vector3(0, b.radius * 1.15, 0)), camAbs);
+      _v.copy(b.position);
+      _v.y += b.radius * 1.15;
+      this.label(`body-${b.id}`, b.name.toUpperCase(), 'body', _v, camAbs);
     }
     const v = sim.active;
-    this.label('vessel', `▲ ${v.name}`, 'vessel', v.absolutePosition(new Vector3()), camAbs);
+    this.label('vessel', `▲ ${v.name}`, 'vessel', v.absolutePosition(_v), camAbs);
     const pred = sim.predictor;
     const patchLabels = (pp: TrajectoryPatch, prefix: string, idx: number, color: string) => {
       const o = pp.orbit;
@@ -400,6 +484,15 @@ export class MapView {
   /** Add a node at the trajectory point closest to the mouse cursor. */
   addNodeAtCursor(): void {
     const inp = this.ctx.input;
+    this.addNodeAt(inp.pointerX, inp.pointerY, 80, true);
+  }
+
+  /**
+   * Add a node where the screen point (x, y) touches a drawn trajectory.
+   * Without `fallback`, a tap further than `maxPx` from every orbit does nothing.
+   */
+  addNodeAt(x: number, y: number, maxPx: number, fallback = false): void {
+    if (!this.visible) return;
     const cam = this.ctx.renderer.camera;
     let best = Infinity;
     let bestT = NaN;
@@ -413,14 +506,15 @@ export class MapView {
         _scr.applyMatrix4(cam.projectionMatrix);
         const sx = (_scr.x * 0.5 + 0.5) * window.innerWidth;
         const sy = (-_scr.y * 0.5 + 0.5) * window.innerHeight;
-        const d = Math.hypot(sx - inp.pointerX, sy - inp.pointerY);
+        const d = Math.hypot(sx - x, sy - y);
         if (d < best) {
           best = d;
           bestT = slot.times[i]!;
         }
       }
     }
-    if (isNaN(bestT) || best > 80) {
+    if (!fallback && (isNaN(bestT) || best > maxPx)) return;
+    if (isNaN(bestT) || best > maxPx) {
       // Fallback: at the next apoapsis/periapsis
       const p0 = this.sim.predictor.patches[0];
       if (!p0) return;
@@ -481,7 +575,9 @@ export class MapView {
   }
 
   dispose(): void {
-    for (const s of [...this.slots, ...this.nodeSlots, this.moonOrbit]) {
+    this.unbindKey();
+    this.visible = false;
+    for (const s of this.slotList) {
       s.line.removeFromParent();
       s.geo.dispose();
       s.mat.dispose();

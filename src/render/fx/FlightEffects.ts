@@ -8,7 +8,11 @@
  *    clouds billow sideways along the ground.
  *  • On the Moon, engine exhaust near the surface blasts regolith sideways.
  *  • Re-entry heat flux spawns glowing plasma streaming off the leading surfaces.
- *  • Destruction events spawn fire, smoke and sparks.
+ *  • Destruction events spawn fire, smoke, sparks and (in air) a shock ring.
+ *  • Ignition flashes, liftoff FROST (ice that formed on cryogenic tanks shakes
+ *    off in the first seconds — the classic Saturn V / Falcon 9 sight), touchdown
+ *    dust, splashdown spray, and the sparkle of unburnt propellant freezing into
+ *    ice crystals when an engine shuts down in vacuum.
  *
  * To keep fast-moving trails continuous we treat the whole engine cluster as one
  * emitter and spawn evenly spaced puffs along the path it travelled since the last
@@ -56,12 +60,19 @@ const _cPos = new Vector3();
 const _lightPos = new Vector3();
 const _cDir = new Vector3();
 
+const _ax = new Vector3();
+const _pp = new Vector3();
+const CRYO = new Set(['kerolox', 'hydrolox', 'methalox']);
+const DUST_COLORS: Record<string, [number, number, number]> = { moon: [0.45, 0.44, 0.42], mars: [0.62, 0.38, 0.22], earth: [0.5, 0.42, 0.3] };
+
 export class FlightEffects {
   readonly particles = new ParticleSystem();
   readonly engineLight = new PointLight(0xffaa66, 0, 0, 2);
   readonly flash = new PointLight(0xffaa55, 0, 0, 2);
   private readonly lastEmit = new Map<string, Vector3>();
   private flashTime = 0;
+  /** Particle density from the quality settings (fewer, larger puffs when low). */
+  density = 1;
 
   constructor() {
     this.engineLight.castShadow = false;
@@ -86,7 +97,10 @@ export class FlightEffects {
       const view = views.get(v.id);
       if (!view) continue;
       this.emitEngines(v, view, camAbs, dt);
+      this.shutdownIce(v, dt);
       if (v.heatFlux > 1.5e5 && v.airDensity > 0) this.emitPlasma(v, dt);
+      if (v.airborneTime > 0 && v.airborneTime < 12 && v.body.atmosphere && v.situation === 'flying') this.emitFrost(v, view, camAbs, dt);
+      if (v.body.id === 'earth' && v.mach > 0.9 && v.mach < 1.12 && v.airDensity > 0.12) this.emitVaporCone(v, dt);
       if (v === act) {
         view.forEachNozzle((pos, _dir, _radius, part) => {
           lightPower += part.thrust;
@@ -160,13 +174,15 @@ export class FlightEffects {
     }
     if (hasAir) {
       const dens = Math.min(1, rho / 0.25);
-      const size0 = clusterR * 2.2 + 1.5;
+      const dq = this.density;
+      // Fewer puffs at low density, each larger so the column stays continuous
+      const size0 = (clusterR * 2.2 + 1.5) / Math.sqrt(dq);
       // Evenly spaced puffs along the path → a continuous column at any speed
       const spacing = Math.max(1.2, size0 * 0.45);
       const travel = prev.distanceTo(_abs);
       let count = Math.floor(travel / spacing);
-      const minCount = Math.floor(15 * dt + Math.random()); // hovering still smokes
-      const cap = Math.ceil(260 * dt);
+      const minCount = Math.floor(15 * dq * dt + Math.random()); // hovering still smokes
+      const cap = Math.ceil(260 * dq * dt);
       let endT = count > 0 ? (count * spacing) / Math.max(travel, 1e-6) : 0;
       if (count > cap) {
         count = cap;
@@ -177,7 +193,8 @@ export class FlightEffects {
         endT = 1;
       }
       const col = SMOKE_COLORS[style];
-      body.surfaceVelocity(_tmp.copy(v.r), _vAbs).add(body.velocity);
+      // Smoke rides the air: ground velocity + wind, so plumes lean downwind
+      body.surfaceVelocity(_tmp.copy(v.r), _vAbs).add(body.velocity).add(v.wind);
       const size1 = (26 + clusterR * 16) * (0.3 + 0.7 * dens) * (style === 'solid' ? 1.4 : 1);
       const alpha = (style === 'hydrolox' ? 0.22 : style === 'solid' ? 0.7 : 0.5) * (0.2 + 0.8 * dens);
       for (let i = 0; i < count; i++) {
@@ -197,6 +214,8 @@ export class FlightEffects {
         this.particles.spawn(_spec);
       }
       if (count > 0) prev.lerp(_abs, endT);
+      // Mars: the landing plume scours ochre dust off the ground
+      if (body.id === 'mars' && radar < 45 && thr > 0.05) this.emitGroundDust(v, radar, clusterR, dt, 0.62, 0.38, 0.22, 0.45);
       // Launch steam: exhaust + deluge water hitting the trench
       if (radar < 150 && thr > 0.05) {
         const gRate = Math.min(90, (40 + 60 * clusterR) * (1 - radar / 150));
@@ -252,6 +271,154 @@ export class FlightEffects {
     }
   }
 
+  /**
+   * Transonic vapour cone: near Mach 1 the air expands and cools in the flow
+   * around the vehicle's shoulders, and in humid air water vapour briefly
+   * condenses into a white collar (the Prandtl–Glauert "singularity" cloud).
+   */
+  private emitVaporCone(v: Vessel, dt: number): void {
+    // Strongest right at Mach ~1, fading either side
+    const k = 1 - Math.min(1, Math.abs(v.mach - 1.0) / 0.12);
+    const n = Math.floor(260 * k * this.density * dt + Math.random());
+    if (n <= 0) return;
+    const spd = v.airVelocity.length();
+    if (spd < 1) return;
+    const flow = _tmp.copy(v.airVelocity).multiplyScalar(-1 / spd); // direction the air moves past us
+    const ax = v.forward(_abs);
+    _east.crossVectors(ax, _up.copy(v.r).normalize());
+    if (_east.lengthSq() < 1e-6) _east.set(1, 0, 0);
+    _east.normalize();
+    _north.crossVectors(ax, _east).normalize();
+    const R = v.refRadius;
+    // Collar sits around the widest point, a bit below the nose
+    const along = v.length * 0.3;
+    const base = _vAbs.copy(v.r).add(v.body.position).addScaledVector(ax, along * 0.2);
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const rr = R * this.rnd(1.1, 2.4);
+      _spec.kind = 'steam';
+      _spec.pos.copy(base).addScaledVector(_east, Math.cos(a) * rr).addScaledVector(_north, Math.sin(a) * rr).addScaledVector(ax, -this.rnd(0, along));
+      _spec.vel.copy(v.v).add(v.body.velocity).addScaledVector(flow, spd * this.rnd(0.02, 0.1));
+      _spec.life = this.rnd(0.12, 0.3);
+      _spec.size0 = R * 0.9;
+      _spec.size1 = R * this.rnd(1.6, 2.6);
+      _spec.color.setRGB(0.97, 0.98, 1.0);
+      _spec.alpha = 0.35 * k;
+      _spec.emissive = 0.9;
+      _spec.drag = 0;
+      _spec.buoyancy = 0;
+      _spec.up.copy(_up);
+      this.particles.spawn(_spec);
+    }
+  }
+
+  /**
+   * Liftoff frost: cryogenic tanks sit on the pad covered in ice condensed from
+   * humid air; at ignition the vibration shakes it off in sheets. Flakes fall
+   * away with gravity and air drag while the rocket accelerates out from under them.
+   */
+  private emitFrost(v: Vessel, view: VesselView, camAbs: Vector3, dt: number): void {
+    const body = v.body;
+    _up.copy(v.r).normalize();
+    _ax.set(0, 1, 0).applyQuaternion(v.q);
+    const fade = 1 - v.airborneTime / 12;
+    body.surfaceVelocity(_tmp.copy(v.r), _vAbs).add(body.velocity);
+    for (const e of view.partEntries) {
+      const p = e.part;
+      if (!p.propellant || !CRYO.has(p.propellant) || p.fuelCapacity <= 0 || p.destroyed) continue;
+      const h = p.height;
+      const r = p.radius;
+      const rate = 28 * this.density * fade * Math.max(0.5, h / 8) * (1 + r);
+      const n = Math.floor(rate * dt + Math.random());
+      if (n <= 0) continue;
+      e.obj.getWorldPosition(_pp).add(camAbs);
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const y = (Math.random() - 0.5) * h;
+        _spec.kind = 'dust';
+        _spec.pos.copy(_pp).addScaledVector(_ax, y);
+        _east.crossVectors(_ax, _up);
+        if (_east.lengthSq() < 1e-6) _east.set(1, 0, 0);
+        _east.normalize();
+        _north.crossVectors(_ax, _east);
+        _spec.pos.addScaledVector(_east, Math.cos(a) * r * 1.02).addScaledVector(_north, Math.sin(a) * r * 1.02);
+        // Flakes leave with the rocket's velocity plus a small outward push
+        _spec.vel.copy(_vAbs).addScaledVector(_east, Math.cos(a) * this.rnd(0.5, 2)).addScaledVector(_north, Math.sin(a) * this.rnd(0.5, 2));
+        _spec.life = this.rnd(1.5, 3.5);
+        _spec.size0 = this.rnd(0.12, 0.4) * (0.6 + r * 0.25);
+        _spec.size1 = _spec.size0 * 0.8;
+        _spec.color.setRGB(0.94, 0.96, 1.0);
+        _spec.alpha = 0.85;
+        _spec.emissive = 0.15;
+        _spec.drag = 0.9;
+        _spec.buoyancy = -body.mu / v.r.lengthSq() * 0.7; // falls, slowed by air
+        _spec.up.copy(_up);
+        this.particles.spawn(_spec);
+      }
+    }
+  }
+
+  private readonly prevThrust = new Map<number, number>();
+
+  /** Engine shutdown in vacuum: residual propellant vents and freezes into a glittering cloud. */
+  private shutdownIce(v: Vessel, dt: number): void {
+    void dt;
+    for (const p of v.parts) {
+      if (!p.isEngine) continue;
+      const prev = this.prevThrust.get(p.uid) ?? 0;
+      const now = p.thrust;
+      this.prevThrust.set(p.uid, now);
+      if (!(prev > 0 && now <= 0) || v.airDensity > 1e-7 || p.destroyed) continue;
+      _tmp.copy(p.position);
+      _tmp.y -= p.height / 2;
+      v.localToBody(_tmp, _pp).add(v.body.position);
+      _ax.set(0, -1, 0).applyQuaternion(v.q);
+      const n = Math.floor(140 * this.density);
+      for (let i = 0; i < n; i++) {
+        _spec.kind = 'spark';
+        _spec.pos.copy(_pp).add(this.jitter(_tmp, p.radius * 0.5));
+        _spec.vel.copy(v.v).add(v.body.velocity).addScaledVector(_ax, this.rnd(3, 25)).add(this.jitter(_tmp, 6));
+        _spec.life = this.rnd(1.5, 4);
+        _spec.size0 = this.rnd(0.04, 0.12) * (0.5 + p.radius);
+        _spec.size1 = _spec.size0 * 1.5;
+        _spec.color.setRGB(0.85, 0.92, 1.0);
+        _spec.alpha = 1;
+        _spec.emissive = 3;
+        _spec.drag = 0;
+        _spec.buoyancy = 0;
+        _spec.up.copy(_up);
+        this.particles.spawn(_spec);
+      }
+    }
+  }
+
+  /** Radial dust sheet where the exhaust hits the ground (thin air: slower, lingering). */
+  private emitGroundDust(v: Vessel, radar: number, clusterR: number, dt: number, r: number, g: number, b: number, alpha: number): void {
+    const body = v.body;
+    const rate = 45 * this.density * (1 - radar / 45) * Math.min(3, 1 + clusterR);
+    const c = Math.floor(rate * dt) + (Math.random() < (rate * dt) % 1 ? 1 : 0);
+    _up.copy(v.r).normalize();
+    _east.set(0, 1, 0).applyQuaternion(body.rotation).cross(_up).normalize();
+    _north.crossVectors(_up, _east);
+    for (let i = 0; i < c; i++) {
+      const a = Math.random() * Math.PI * 2;
+      _spec.kind = 'dust';
+      _spec.pos.copy(v.r).add(body.position).addScaledVector(_up, -(v.altitude - v.terrainHeight) + 0.8);
+      _spec.vel.copy(body.velocity).add(body.surfaceVelocity(_tmp.copy(v.r), _tmp)).add(v.wind);
+      _spec.vel.addScaledVector(_east, Math.cos(a) * this.rnd(15, 45)).addScaledVector(_north, Math.sin(a) * this.rnd(15, 45)).addScaledVector(_up, this.rnd(1, 6));
+      _spec.life = this.rnd(3, 7);
+      _spec.size0 = 3;
+      _spec.size1 = this.rnd(18, 40);
+      _spec.color.setRGB(r, g, b);
+      _spec.alpha = alpha;
+      _spec.emissive = 0;
+      _spec.drag = 0.6;
+      _spec.buoyancy = 0.15;
+      _spec.up.copy(_up);
+      this.particles.spawn(_spec);
+    }
+  }
+
   private emitPlasma(v: Vessel, dt: number): void {
     const intensity = Math.min(1, v.heatFlux / 2e6);
     const n = Math.floor(600 * intensity * dt + Math.random());
@@ -290,10 +457,69 @@ export class FlightEffects {
     if (e.kind === 'crash' || e.kind === 'overheat' || e.kind === 'breakup' || e.kind === 'vessel-destroyed') {
       const size = e.part ? Math.max(2, e.part.radius * 2 + e.part.height * 0.3) : 6;
       this.explosion(pos, vel, size, air);
+      if (air) this.shockRing(pos, vel, size);
       this.flash.position.copy(pos).sub(camAbs);
       this.flash.intensity = 2e5 * size;
       this.flashTime = 1.5;
+    } else if (e.kind === 'ignition' && e.part) {
+      // Ignition: a bright, brief fireball at the nozzle as the start-up propellants light
+      _tmp.copy(e.part.position);
+      _tmp.y -= e.part.height / 2;
+      v.localToBody(_tmp, pos).add(body.position);
+      const r = Math.max(0.3, e.part.radius);
+      this.flash.position.copy(pos).sub(camAbs);
+      this.flash.intensity = Math.max(this.flash.intensity, 6e4 * r);
+      this.flashTime = Math.max(this.flashTime, 0.35);
+      _ax.set(0, -1, 0).applyQuaternion(v.q);
+      const n = Math.floor(30 * this.density) + 6;
+      for (let i = 0; i < n; i++) {
+        _spec.kind = 'fire';
+        _spec.pos.copy(pos).add(this.jitter(_tmp, r * 0.6)).addScaledVector(_ax, this.rnd(0, r * 2));
+        _spec.vel.copy(vel).addScaledVector(_ax, this.rnd(4, 30)).add(this.jitter(_tmp, r * 4));
+        _spec.life = this.rnd(0.15, 0.5);
+        _spec.size0 = r * this.rnd(0.6, 1.4);
+        _spec.size1 = r * this.rnd(2, 4);
+        _spec.color.setRGB(1, this.rnd(0.55, 0.8), this.rnd(0.2, 0.4));
+        _spec.alpha = 1;
+        _spec.emissive = 10;
+        _spec.drag = air ? 2 : 0;
+        _spec.buoyancy = air ? 6 : 0;
+        _spec.up.copy(_up);
+        this.particles.spawn(_spec);
+      }
+    } else if (e.kind === 'touchdown' || e.kind === 'splashdown') {
+      const speed = e.speed ?? 2;
+      const strength = Math.min(3, 0.4 + speed / 3);
+      const n = Math.floor((e.kind === 'splashdown' ? 90 : 60) * strength * this.density);
+      _east.set(0, 1, 0).applyQuaternion(body.rotation).cross(_up).normalize();
+      _north.crossVectors(_up, _east);
+      body.surfaceVelocity(_tmp.copy(v.r), _vAbs).add(body.velocity).add(v.wind);
+      const R = Math.max(1.5, v.refRadius * 1.5);
+      const dc = DUST_COLORS[body.id] ?? DUST_COLORS.earth!;
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const splash = e.kind === 'splashdown';
+        _spec.kind = splash ? 'steam' : 'dust';
+        _spec.pos.copy(pos).addScaledVector(_up, -(v.radarAltitude) + 0.5).addScaledVector(_east, Math.cos(a) * R).addScaledVector(_north, Math.sin(a) * R);
+        const out = this.rnd(4, 14) * strength;
+        _spec.vel.copy(_vAbs).addScaledVector(_east, Math.cos(a) * out).addScaledVector(_north, Math.sin(a) * out).addScaledVector(_up, this.rnd(2, 10) * strength * (splash ? 1.6 : 0.6));
+        _spec.life = splash ? this.rnd(0.8, 2) : this.rnd(1.5, 4) * (air ? 1 : 0.6);
+        _spec.size0 = R * this.rnd(0.4, 0.8);
+        _spec.size1 = R * this.rnd(2, 5);
+        if (splash) _spec.color.setRGB(0.9, 0.93, 0.97);
+        else _spec.color.setRGB(dc[0], dc[1], dc[2]);
+        _spec.alpha = splash ? 0.6 : 0.45;
+        _spec.emissive = 0;
+        _spec.drag = air ? 1.4 : 0.05;
+        _spec.buoyancy = air ? (splash ? -6 : 0.3) : -body.mu / v.r.lengthSq();
+        _spec.up.copy(_up);
+        this.particles.spawn(_spec);
+      }
     } else if (e.kind === 'decouple' || e.kind === 'fairing') {
+      // Pyrotechnic separation: a short white flash on the seam
+      this.flash.position.copy(pos).sub(camAbs);
+      this.flash.intensity = Math.max(this.flash.intensity, 2.5e4);
+      this.flashTime = Math.max(this.flashTime, 0.2);
       for (let i = 0; i < 26; i++) {
         _spec.kind = air ? 'smoke' : 'spark';
         _spec.pos.copy(pos).add(this.jitter(_tmp, 1.5));
@@ -309,6 +535,32 @@ export class FlightEffects {
         _spec.up.copy(_up);
         this.particles.spawn(_spec);
       }
+    }
+  }
+
+  /** Expanding ring of condensation where the blast wave compresses humid air. */
+  private shockRing(pos: Vector3, vel: Vector3, size: number): void {
+    _east.set(1, 0, 0);
+    if (Math.abs(_east.dot(_up)) > 0.9) _east.set(0, 0, 1);
+    _east.cross(_up).normalize();
+    _north.crossVectors(_up, _east);
+    const n = Math.floor(48 * this.density) + 12;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.1;
+      const speed = this.rnd(90, 130) * Math.sqrt(size / 6);
+      _spec.kind = 'steam';
+      _spec.pos.copy(pos).addScaledVector(_east, Math.cos(a) * size).addScaledVector(_north, Math.sin(a) * size);
+      _spec.vel.copy(vel).addScaledVector(_east, Math.cos(a) * speed).addScaledVector(_north, Math.sin(a) * speed);
+      _spec.life = this.rnd(0.45, 0.7);
+      _spec.size0 = size * 0.8;
+      _spec.size1 = size * 2.5;
+      _spec.color.setRGB(0.95, 0.96, 1);
+      _spec.alpha = 0.45;
+      _spec.emissive = 0.6;
+      _spec.drag = 2.5;
+      _spec.buoyancy = 0;
+      _spec.up.copy(_up);
+      this.particles.spawn(_spec);
     }
   }
 

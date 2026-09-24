@@ -21,6 +21,7 @@ import { Vector3 } from 'three';
 import { CelestialBody } from '../physics/CelestialBody';
 import type { SolarSystem } from '../physics/SolarSystem';
 import type { LaunchSite } from '../world/LaunchSites';
+import { MARS_ARRIVAL_WEIGHT, MARS_TOF_MAX, MARS_TOF_MIN, porkchop } from '../physics/Lambert';
 
 export interface LaunchWindow {
   /** Liftoff time (UT seconds since J2000). */
@@ -29,6 +30,8 @@ export interface LaunchWindow {
   heading: number;
   /** Resulting orbital inclination (degrees). */
   inclination: number;
+  /** Target orbital plane (unit normal, inertial frame) for plane-following ascent guidance. */
+  normal: Vector3;
 }
 
 const DEG = Math.PI / 180;
@@ -44,17 +47,28 @@ const POLE = new Vector3(0, 1, 0);
 
 /** Earliest good lunar launch time within ~1 day after `from`. */
 export function lunarLaunchWindow(system: SolarSystem, site: LaunchSite, from: number): LaunchWindow {
-  const earth = system.earth;
   const moon = system.moon;
+  return planeLaunchWindow(system, site, from, (t, out) => {
+    moon.relativeStateAt(t + TRANSFER_TIME, out);
+    return out.normalize();
+  });
+}
+
+/**
+ * Launch time/azimuth (within a day after `from`) whose parking-orbit plane
+ * contains the direction `target(t)` — the Moon's future position, or the
+ * departure asymptote of an interplanetary transfer.
+ */
+export function planeLaunchWindow(system: SolarSystem, site: LaunchSite, from: number, target: (t: number, out: Vector3) => Vector3): LaunchWindow {
+  const earth = system.earth;
   const saved = system.time;
-  let best: LaunchWindow = { ut: from, heading: 90, inclination: Math.abs(site.lat) };
+  let best: LaunchWindow = { ut: from, heading: 90, inclination: Math.abs(site.lat), normal: new Vector3(0, 1, 0) };
   let bestCost = Infinity;
   for (let k = 0; k <= 288; k++) {
     const t = from + k * 300;
     system.update(t);
     CelestialBody.dirFromLatLon(site.lat * DEG, site.lon * DEG, _s).applyQuaternion(earth.rotation).normalize();
-    moon.relativeStateAt(t + TRANSFER_TIME, _m);
-    _m.normalize();
+    target(t, _m);
     _n.crossVectors(_s, _m);
     if (_n.lengthSq() < 1e-4) continue; // Moon straight overhead/underfoot: plane undefined
     _n.normalize();
@@ -70,9 +84,39 @@ export function lunarLaunchWindow(system: SolarSystem, site: LaunchSite, from: n
     const cost = Math.abs(heading - 90) + k * 0.02; // gently prefer earlier windows
     if (cost < bestCost) {
       bestCost = cost;
-      best = { ut: t, heading, inclination: Math.acos(Math.min(1, Math.abs(_n.dot(POLE)))) / DEG };
+      best = { ut: t, heading, inclination: Math.acos(Math.min(1, Math.abs(_n.dot(POLE)))) / DEG, normal: _n.clone() };
     }
   }
   system.update(saved);
   return best;
+}
+
+export interface MarsWindow extends LaunchWindow {
+  /** Planned trans-Mars injection (departure) and Mars arrival times (UT). */
+  depart: number;
+  arrive: number;
+  /** Departure hyperbolic excess speed (m/s). */
+  vInf: number;
+}
+
+/**
+ * Next Earth → Mars transfer window after `from` (porkchop search with Lambert's
+ * problem), then the launch time on the day before departure that puts the
+ * parking orbit in the plane of the departure asymptote.
+ */
+export function marsLaunchWindow(system: SolarSystem, site: LaunchSite, from: number): MarsWindow {
+  const saved = system.time;
+  const src = (b: CelestialBody) => ({ stateAt: (t: number, r: Vector3, v: Vector3) => b.relativeStateAt(t, r, v) });
+  const day = 86400;
+  const tr = porkchop(from, 800 * day, MARS_TOF_MIN, MARS_TOF_MAX, system.sun.mu, src(system.earth), src(system.mars), MARS_ARRIVAL_WEIGHT);
+  system.update(saved);
+  if (!tr) {
+    const w = planeLaunchWindow(system, site, from, (_t, out) => out.set(1, 0, 0));
+    return { ...w, depart: from + day, arrive: from + 220 * day, vInf: 3000 };
+  }
+  const vInfDir = tr.vInfDepart.clone().normalize();
+  // Launch within about half a day of the optimal departure; the injection burn
+  // follows an orbit or two after reaching the parking orbit
+  const w = planeLaunchWindow(system, site, tr.depart - 0.6 * day, (_t, out) => out.copy(vInfDir));
+  return { ...w, depart: tr.depart, arrive: tr.arrive, vInf: Math.sqrt(tr.c3) };
 }

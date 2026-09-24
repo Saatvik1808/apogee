@@ -42,7 +42,9 @@ import {
   Texture,
   Vector2,
   Vector3,
+  type BufferGeometry,
   type WebGLRenderer,
+  type WebGLRenderTarget,
 } from 'three';
 import type { CraftData, CraftPart, PartLayout } from '../../parts/Craft';
 import { craftBounds, layoutCraft } from '../../parts/Craft';
@@ -84,6 +86,12 @@ export class VABScene {
   private readonly key: DirectionalLight;
   private readonly renderer: WebGLRenderer;
   private envTex: Texture | null = null;
+  /** PMREM target behind envTex — a render-target texture is only freed through its target. */
+  private envRT: WebGLRenderTarget | null = null;
+  /** Hangar geometry/materials/textures created here (part visuals are disposed separately). */
+  private readonly ownGeometries: BufferGeometry[] = [];
+  private readonly ownMaterials: Material[] = [];
+  private readonly ownTextures: Texture[] = [];
   private readonly raycaster = new Raycaster();
   /** Part uid → root object of its visual. */
   readonly partObjects = new Map<number, Group>();
@@ -100,7 +108,12 @@ export class VABScene {
   private readonly hoverMat = new MeshBasicMaterial({ color: new Color(0.35, 0.8, 1.2), transparent: true, opacity: 0.2, blending: AdditiveBlending, depthWrite: false });
   private nodes: Array<{ node: AttachNode; mesh: Mesh }> = [];
 
-  constructor(renderer: WebGLRenderer, assets: GameAssets) {
+  /**
+   * @param shadows the player's shadow setting (the hangar has its own key light,
+   *   so the renderer's shadow state must be set here — not inherited from
+   *   whichever flight ran last)
+   */
+  constructor(renderer: WebGLRenderer, assets: GameAssets, shadows: { enabled: boolean; size: number } = { enabled: true, size: 2048 }) {
     this.renderer = renderer;
     const s = this.scene;
     // Image-based lighting from the hangar panorama
@@ -108,7 +121,8 @@ export class VABScene {
       const hdr = assets.vabHdr;
       hdr.mapping = EquirectangularReflectionMapping;
       const pm = new PMREMGenerator(renderer);
-      this.envTex = pm.fromEquirectangular(hdr).texture;
+      this.envRT = pm.fromEquirectangular(hdr);
+      this.envTex = this.envRT.texture;
       pm.dispose();
       s.environment = this.envTex;
       s.environmentIntensity = 1.1;
@@ -120,9 +134,10 @@ export class VABScene {
       s.add(new HemisphereLight(0xbfd4ff, 0x302820, 1.4));
     }
     // Key light (high, from the front-left) for defined shadows
+    renderer.shadowMap.enabled = shadows.enabled;
     this.key = new DirectionalLight(0xfff1e0, 2.2);
-    this.key.castShadow = true;
-    this.key.shadow.mapSize.set(2048, 2048);
+    this.key.castShadow = shadows.enabled;
+    this.key.shadow.mapSize.set(shadows.size, shadows.size);
     this.key.shadow.bias = -0.0004;
     this.key.shadow.normalBias = 0.03;
     s.add(this.key, this.key.target);
@@ -138,6 +153,7 @@ export class VABScene {
       c.repeat.set(24, 24);
       if (srgb) c.colorSpace = SRGBColorSpace;
       c.needsUpdate = true;
+      this.ownTextures.push(c);
       return c;
     };
     const floorMat = new MeshStandardMaterial({
@@ -149,13 +165,17 @@ export class VABScene {
       color: 0x9a9a98,
       envMapIntensity: 0.9,
     });
-    const floor = new Mesh(new CircleGeometry(90, 96), floorMat);
+    const own = <T extends BufferGeometry>(g: T): T => {
+      this.ownGeometries.push(g);
+      return g;
+    };
+    const floor = new Mesh(own(new CircleGeometry(90, 96)), floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     s.add(floor);
     const ringMat = new MeshStandardMaterial({ color: 0xe8b21a, roughness: 0.5, emissive: new Color(0.05, 0.03, 0) });
     for (const [r0, r1] of [[9.6, 10], [18.8, 19]] as const) {
-      const ring = new Mesh(new RingGeometry(r0, r1, 128), ringMat);
+      const ring = new Mesh(own(new RingGeometry(r0, r1, 128)), ringMat);
       ring.rotation.x = -Math.PI / 2;
       ring.position.y = 0.01;
       ring.receiveShadow = true;
@@ -163,11 +183,12 @@ export class VABScene {
     }
     // Launch-mount pedestal under the rocket
     const pedMat = new MeshStandardMaterial({ color: 0x2b2e34, roughness: 0.45, metalness: 0.7 });
-    const ped = new Mesh(new CircleGeometry(4.2, 64), pedMat);
+    const ped = new Mesh(own(new CircleGeometry(4.2, 64)), pedMat);
     ped.rotation.x = -Math.PI / 2;
     ped.position.y = 0.02;
     ped.receiveShadow = true;
     s.add(ped);
+    this.ownMaterials.push(floorMat, ringMat, pedMat, this.nodeMat, this.nodeHotMat, this.ghostMat, this.selectMat, this.hoverMat);
 
     s.add(this.craftGroup, this.ghostGroup, this.nodeGroup, this.highlightGroup);
     this.nodeGroup.renderOrder = 50;
@@ -394,7 +415,16 @@ export class VABScene {
     for (const o of this.partObjects.values()) disposeObject(o);
     this.setGhost(null, []);
     this.showNodes([], null, 1);
-    this.envTex?.dispose();
+    // The PMREM environment (≈6 MB) and the 2048² shadow map (≈32 MB) are
+    // per-visit GPU allocations: free them, or every trip to the hangar leaks them
+    this.envRT?.dispose();
+    this.envRT = null;
+    this.envTex = null;
+    this.key.shadow.dispose();
+    this.key.dispose();
+    for (const g of this.ownGeometries) g.dispose();
+    for (const m of this.ownMaterials) m.dispose();
+    for (const t of this.ownTextures) t.dispose();
     this.renderer.renderLists.dispose();
   }
 }

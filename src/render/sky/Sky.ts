@@ -164,7 +164,11 @@ export class Sky {
       blending: AdditiveBlending,
       depthTest: false,
       depthWrite: false,
-      transparent: true,
+      // NOT transparent: a transparent material goes into three's transparent
+      // queue, drawn after every opaque object — with depth testing off the stars
+      // would then shine through planets and the rocket. Additive blending still
+      // applies in the opaque queue, and renderOrder puts the stars first.
+      transparent: false,
     });
     const pts = new Points(g, this.starMat);
     pts.frustumCulled = false;

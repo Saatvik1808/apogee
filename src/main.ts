@@ -23,10 +23,11 @@ import { PostFX } from './render/post/PostFX';
 import { EnvironmentProbe } from './render/EnvironmentProbe';
 import { Input } from './game/Input';
 import { AudioEngine } from './audio/AudioEngine';
-import { loadSave } from './game/Save';
+import { hasSave, loadSave, writeSave } from './game/Save';
+import { Platform } from './platform/Platform';
 import { App } from './game/App';
 import type { GameContext } from './game/GameContext';
-import { applyQuality } from './game/Quality';
+import { applyPreset, applyQuality, resolution, textureTier } from './game/Quality';
 
 function loadingScreen(root: HTMLElement) {
   const el = document.createElement('div');
@@ -55,7 +56,12 @@ function loadingScreen(root: HTMLElement) {
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app')!;
+  const platform = new Platform();
   const loading = loadingScreen(root);
+  // Our loading screen is up: drop the native launch screen (again once the
+  // first frame has painted — an early call can race the native splash)
+  platform.hideSplash();
+  requestAnimationFrame(() => setTimeout(() => platform.hideSplash(), 150));
   let renderer: Renderer;
   try {
     renderer = new Renderer(root);
@@ -63,9 +69,19 @@ async function boot(): Promise<void> {
     loading.error('APOGEE needs WebGL 2. Please use a recent Chrome, Edge, Firefox or Safari.');
     throw e;
   }
+  const firstRun = !hasSave();
   const save = loadSave();
-  const texQuality = save.settings.quality === 'low' || save.settings.quality === 'medium' ? 'standard' : 'high';
-  const assets = await loadAssets(texQuality, renderer.maxTextureSize, (f, l) => loading.progress(f * 0.75, `Loading ${l}`));
+  if (firstRun && platform.touchDevice) {
+    // Phones and tablets start on the Balanced preset
+    save.settings.quality = 'medium';
+  }
+  applyPreset(save.settings, platform.touchDevice);
+  if (firstRun) writeSave(save);
+  const s0 = save.settings;
+  platform.setTouch(s0.touchControls === 'on' || (s0.touchControls === 'auto' && platform.touchDevice));
+  platform.haptics = s0.haptics;
+  const texQuality = textureTier(s0, renderer.maxTextureSize, platform.native);
+  const assets = await loadAssets(texQuality, renderer.maxTextureSize, (f, l) => loading.progress(f * 0.75, `Loading ${l}`), platform.native);
   const epoch = utFromDate(new Date(Date.UTC(2026, 8, 24, 13, 30, 0)));
   const system = new SolarSystem(epoch);
   const urls: TerrainUrls = {
@@ -108,9 +124,14 @@ async function boot(): Promise<void> {
     input: new Input(renderer.canvas),
     audio: new AudioEngine(),
     save,
+    platform,
     ui,
+    textureTierLoaded: texQuality,
   };
   applyQuality(ctx);
+  // A window move to another monitor or a phone rotation changes the device
+  // pixel ratio / pixel count: re-derive the render scale and atmosphere buffer
+  renderer.onResize(() => resolution.apply(ctx));
   loading.progress(0.95, 'Streaming planet surfaces');
   await pool.ready;
   // Give the workers a moment to deliver the root patches
@@ -124,6 +145,7 @@ async function boot(): Promise<void> {
   (window as unknown as { __apg: unknown }).__apg = { app, ctx };
   app.start();
   loading.hide();
+  platform.hideSplash();
 }
 
 boot().catch((e: unknown) => {

@@ -10,8 +10,10 @@
  * target climb rate. As horizontal speed approaches orbital velocity, v_h²/r → g,
  * the required pitch falls to zero and the vehicle slides into a circular orbit.
  *
- * MANEUVER EXECUTION. Point along the remaining Δv vector, start half a burn
- * time before the node, and throttle down as the remaining Δv shrinks.
+ * MANEUVER EXECUTION. Point along the remaining Δv vector and start so that
+ * half the Δv is delivered before the node (not half the burn TIME — the rocket
+ * lightens as it burns, so the Δv comes faster at the end), then throttle down
+ * as the remaining Δv shrinks.
  *
  * POWERED DESCENT (the "suicide burn"). Stopping distance under constant
  * deceleration a is d = v²/2a. We fly a reference profile v_ref(h) = √(2·a·h)
@@ -36,6 +38,13 @@ export interface AscentParams {
   targetAltitude: number;
   /** Launch heading, degrees clockwise from north (90 = due east). */
   heading: number;
+  /**
+   * Target orbital plane (unit normal, inertial frame) from a launch window. When
+   * set, the rocket steers to stay IN that plane instead of holding a compass
+   * heading — a constant heading would curve the ground track and rotate the
+   * orbit's node by 15–20° over 2,000 km of downrange flight.
+   */
+  planeNormal: Vector3 | null;
   /** Surface speed at which the pitch-over starts (m/s). */
   turnStartSpeed: number;
   autoStage: boolean;
@@ -54,6 +63,7 @@ const _up = new Vector3();
 const _east = new Vector3();
 const _north = new Vector3();
 const _dir = new Vector3();
+const _plane = new Vector3();
 const _tmp = new Vector3();
 const _pro = new Vector3();
 const _sUp = new Vector3();
@@ -67,6 +77,7 @@ export class Autopilot {
   readonly ascent: AscentParams = {
     targetAltitude: 200_000,
     heading: 90,
+    planeNormal: null,
     turnStartSpeed: 60,
     autoStage: true,
     maxG: 5,
@@ -142,13 +153,17 @@ export class Autopilot {
     _north.crossVectors(_up, _east).normalize();
   }
 
-  /** Thrust available right now from ignited, fuelled engines (N). */
+  /**
+   * Thrust available right now from ignited engines that can actually burn (N):
+   * a liquid engine whose tanks ran dry counts for nothing, however many
+   * re-ignitions it has left.
+   */
   private availableThrust(v: Vessel): number {
     let t = 0;
     for (const p of v.parts) {
       if (!p.isEngine || !p.engineIgnited) continue;
       if (p.flameout && (p.isSolid || p.ignitionsLeft <= 0)) continue;
-      if (p.isSolid && p.fuel <= 0) continue;
+      if (v.engineFuel(p) <= 0) continue;
       t += p.stats.thrustVac;
     }
     return t;
@@ -158,30 +173,45 @@ export class Autopilot {
     if (!this.ascent.autoStage) return;
     this.stageTimer -= dt;
     if (this.stageTimer > 0) return;
+    // Evaluate a few times a second, not every physics step
+    this.stageTimer = 0.25;
+    v.pruneEmptyStages();
     const next = v.stages[v.nextStage];
     if (!next) return;
-    const parts = next.map((u) => v.partByUid(u)).filter((p) => !!p);
-    const nextHasEngine = parts.some((p) => p!.isEngine);
-    const thrustNow = v.totalThrust;
-    const anyRunning = v.parts.some((p) => p.isEngine && p.engineIgnited && p.thrust > 0);
+    let nextHasEngine = false;
+    let onlyFairing = next.length > 0;
     // Drop decoupled sections whose engines are all dry
-    const decs = parts.filter((p) => p!.def.decoupler);
     let dropsSpent = false;
-    if (decs.length) {
-      dropsSpent = true;
-      let anyEngine = false;
-      for (const d of decs) {
-        for (const q of v.subtree(d!)) {
+    let anyDecoupler = false;
+    let anyEngineBelow = false;
+    for (const u of next) {
+      const p = v.partByUid(u);
+      if (!p) continue;
+      if (p.isEngine) nextHasEngine = true;
+      if (!p.def.fairing) onlyFairing = false;
+      if (p.def.decoupler) {
+        if (!anyDecoupler) {
+          anyDecoupler = true;
+          dropsSpent = true;
+        }
+        for (const q of v.subtree(p)) {
           if (q.isEngine) {
-            anyEngine = true;
+            anyEngineBelow = true;
             const dry = q.isSolid ? q.fuel <= 0 : q.flameout || !q.engineIgnited;
             if (!dry) dropsSpent = false;
           }
         }
       }
-      if (!anyEngine) dropsSpent = false;
     }
-    const onlyFairing = parts.length > 0 && parts.every((p) => !!p!.def.fairing);
+    if (!anyEngineBelow) dropsSpent = false;
+    const thrustNow = v.totalThrust;
+    let anyRunning = false;
+    for (const p of v.parts) {
+      if (p.isEngine && p.engineIgnited && p.thrust > 0) {
+        anyRunning = true;
+        break;
+      }
+    }
     const atmTop = v.body.atmosphere ? v.body.atmosphere.ceiling : 0;
     let go = false;
     if (v.situation === 'prelaunch') go = true;
@@ -222,6 +252,18 @@ export class Autopilot {
     const hdg = a.heading * DEG;
     // Horizontal heading direction
     _dir.copy(_north).multiplyScalar(Math.cos(hdg)).addScaledVector(_east, Math.sin(hdg)).normalize();
+    if (a.planeNormal) {
+      // Plane guidance: fly along the target plane (n × up), in the sense of the
+      // launch heading, and steer against any velocity leaking out of the plane
+      _plane.crossVectors(a.planeNormal, _up);
+      if (_plane.lengthSq() > 1e-6) {
+        _plane.normalize();
+        if (_plane.dot(_dir) < 0) _plane.negate();
+        const vOut = v.v.dot(a.planeNormal);
+        const vHor = Math.max(200, Math.sqrt(Math.max(0, v.v.lengthSq() - v.v.dot(_up) ** 2)));
+        _dir.copy(_plane).addScaledVector(a.planeNormal, -clamp((2 * vOut) / vHor, -0.35, 0.35)).normalize();
+      }
+    }
     const surfSpeed = v.surfaceVelocity.length();
     const atmTop = body.atmosphere ? body.atmosphere.ceiling : 0;
 
@@ -325,7 +367,9 @@ export class Autopilot {
     }
     this.hasTarget = true;
     v.controls.throttle = throttle;
-    if (thrustAvail <= 0 && v.nextStage >= v.stages.length) {
+    // Nothing left to burn and no later stage brings an engine with propellant
+    // (a parachute stage does not count): give up rather than "burn" forever
+    if (thrustAvail <= 0 && !v.hasEngineInLaterStage()) {
       this.disengage('Autopilot: out of propellant before orbit');
       v.controls.throttle = 0;
     }
@@ -342,6 +386,11 @@ export class Autopilot {
     this.tryAutoStage(sim, v, dt);
     const rem = n.remaining.length();
     const burn = estimateBurnTime(v, rem);
+    // Centre the burn on its Δv, not its duration: the rocket gets lighter as it
+    // burns, so the second half of the Δv takes less time than the first. Starting
+    // when half the Δv still lies before the node keeps long burns (TLI, TMI)
+    // pointed where the impulsive plan intended.
+    const lead = estimateBurnTime(v, rem / 2);
     const tTo = n.time - sim.time;
     if (rem > 1e-3) {
       this.target.copy(n.remaining).normalize();
@@ -350,8 +399,14 @@ export class Autopilot {
     const err = sim.attitude.error;
     const thrust = this.availableThrust(v);
     const aT = thrust / v.mass;
+    if (thrust <= 0 && !v.hasEngineInLaterStage() && (n.burning || tTo <= 0)) {
+      // Ran dry mid-burn with nothing left to stage: stop instead of waiting forever
+      v.controls.throttle = 0;
+      this.disengage(`Maneuver aborted — out of propellant, ${rem.toFixed(0)} m/s short`);
+      return;
+    }
     let throttle = 0;
-    if (isFinite(burn) && tTo <= burn / 2 + 0.05) {
+    if (isFinite(lead) && tTo <= lead + 0.05) {
       if (err < 4 * DEG || (n.burning && err < 15 * DEG)) {
         throttle = aT > 0 ? clamp(rem / (aT * 1.2), 0.02, 1) : 1;
         this.phase = `Burning — ${rem.toFixed(1)} m/s left`;
@@ -359,9 +414,10 @@ export class Autopilot {
         this.phase = 'Aligning';
       }
     } else {
-      this.phase = `Waiting — burn in ${Math.max(0, tTo - (isFinite(burn) ? burn / 2 : 0)).toFixed(0)} s`;
+      this.phase = `Waiting — burn in ${Math.max(0, tTo - (isFinite(lead) ? lead : 0)).toFixed(0)} s`;
     }
-    const minT = v.parts.reduce((m, p) => (p.isEngine && p.engineIgnited && p.def.engine ? Math.min(m, p.def.engine.minThrottle) : m), 1);
+    let minT = 1;
+    for (const p of v.parts) if (p.isEngine && p.engineIgnited && p.def.engine) minT = Math.min(minT, p.def.engine.minThrottle);
     if (throttle > 0 && throttle < minT && rem < 0.4) throttle = 0;
     if (n.burning && (rem < 0.08 || (throttle === 0 && rem < 0.5 && tTo < -burn))) {
       v.controls.throttle = 0;
@@ -463,12 +519,15 @@ export class Autopilot {
     if (aMax <= g * 1.05) this.phase = 'Insufficient thrust to land!';
     this.tryAutoStage(sim, v, dt);
 
-    // 1. De-orbit: lower the periapsis to ~15 km above the highest terrain (the
-    //    classic "descent orbit insertion"), then coast down to it.
+    // 1. De-orbit: lower the periapsis to ~5 km above the highest terrain (the
+    //    classic "descent orbit insertion"), then coast down to it. With an
+    //    atmosphere (Mars) the periapsis goes well inside it instead, so drag and
+    //    the braking burn below can finish the job — an orbit that never dips into
+    //    the air would leave the autopilot "coasting, braking soon" forever.
     const hiTerrain = body.terrain ? body.terrain.maxHeight : 0;
     const o = sim.predictor.count > 0 ? sim.predictor.patches[0]!.orbit : null;
-    if (!body.atmosphere && o && o.isElliptic && !this.braking && vhMag > 30) {
-      const peGoal = body.radius + hiTerrain + 5_000;
+    if (o && o.isElliptic && !this.braking && vhMag > 30) {
+      const peGoal = body.atmosphere ? body.radius + Math.max(hiTerrain + 5_000, body.atmosphere.ceiling * 0.35) : body.radius + hiTerrain + 5_000;
       if (o.periapsis > peGoal + 3_000) {
         this.phase = 'Descent orbit insertion';
         this.target.copy(v.v).normalize().negate();

@@ -126,6 +126,8 @@ function plumeGeometry(): CylinderGeometry {
     // radius 1, height 1, from y=0 down to y=-1, open ended, many length segments
     sharedGeo = new CylinderGeometry(1, 1, 1, 28, 24, true);
     sharedGeo.translate(0, -0.5, 0);
+    // One geometry for every plume: per-part disposal must leave it alone
+    sharedGeo.userData.shared = true;
   }
   return sharedGeo;
 }

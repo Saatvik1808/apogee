@@ -45,6 +45,7 @@ import {
 } from '../core/constants';
 import { clamp } from '../core/math';
 import { createAtmosphereSample } from '../physics/Atmosphere';
+import type { WindField } from '../physics/Wind';
 import type { FlightPart } from './FlightPart';
 import type { Vessel } from './Vessel';
 
@@ -116,6 +117,11 @@ const _ground = new Vector3();
 const _dirBF = new Vector3();
 const _east = new Vector3();
 const _north = new Vector3();
+const _rL = new Vector3();
+const _nL = new Vector3();
+const _tL = new Vector3();
+const _rx = new Vector3();
+const _Ir = new Vector3();
 
 function machFactor(m: number): number {
   if (m < 0.8) return 1;
@@ -133,6 +139,8 @@ export class VesselPhysics {
   readonly events: FlightEvent[] = [];
   readonly destroyQueue: DestroyRequest[] = [];
   time = 0;
+  /** This flight's weather (null = still air). */
+  wind: WindField | null = null;
 
   /** Force & torque (vessel frame) accumulators. */
   private readonly force = new Vector3();
@@ -168,11 +176,23 @@ export class VesselPhysics {
     const vs = v.surfaceVelocity.dot(_up);
     v.horizontalSpeed = Math.sqrt(Math.max(0, v.surfaceVelocity.lengthSq() - vs * vs));
 
+    // Wind: aerodynamics see the velocity relative to the moving air
+    v.wind.set(0, 0, 0);
+    if (this.wind && body.atmosphere) {
+      _east.set(0, 1, 0).applyQuaternion(body.rotation).cross(_up);
+      if (_east.lengthSq() > 1e-10) {
+        _east.normalize();
+        _north.crossVectors(_up, _east);
+        this.wind.sample(body.id, v.altitude, this.time, _east, _north, v.wind);
+      }
+    }
+    v.airVelocity.copy(v.surfaceVelocity).sub(v.wind);
+
     if (body.atmosphere && v.altitude < 1_000_000) {
       body.atmosphere.sample(v.altitude, this.atm);
       v.airDensity = this.atm.density;
       v.staticPressure = this.atm.pressure;
-      const spd = v.surfaceVelocity.length();
+      const spd = v.airVelocity.length();
       v.dynamicPressure = 0.5 * this.atm.density * spd * spd;
       v.mach = spd / this.atm.speedOfSound;
       v.inAtmosphere = v.altitude < body.atmosphere.ceiling;
@@ -183,11 +203,11 @@ export class VesselPhysics {
       v.mach = 0;
       v.inAtmosphere = false;
     }
-    // Angle of attack
-    const spd = v.surfaceVelocity.length();
+    // Angle of attack (to the airflow)
+    const spd = v.airVelocity.length();
     if (spd > 1) {
       v.forward(_tmp);
-      v.angleOfAttack = Math.acos(clamp(_tmp.dot(v.surfaceVelocity) / spd, -1, 1));
+      v.angleOfAttack = Math.acos(clamp(_tmp.dot(v.airVelocity) / spd, -1, 1));
     } else {
       v.angleOfAttack = 0;
     }
@@ -211,7 +231,7 @@ export class VesselPhysics {
     if (v.airDensity > 1e-12) this.applyAero(v);
     else for (const p of v.parts) p.heatFlux = 0;
     this.applyThermal(v, dt);
-    this.applyContacts(v);
+    this.applyContacts(v, dt);
 
     // Fuel was consumed: recompute mass properties before integrating
     v.computeMassProperties(true);
@@ -239,7 +259,13 @@ export class VesselPhysics {
       if (chute && p.chuteState !== 'stowed' && p.chuteState !== 'cut') {
         const q = v.dynamicPressure;
         if (p.chuteState === 'armed') {
-          if (v.staticPressure > chute.semiPressure && v.surfaceVelocity.length() > 1) {
+          // The semi-deploy pressure is specified for Earth; on a thin-air world
+          // (Mars: 610 Pa at the datum) the same fraction of the surface pressure
+          // marks "deep enough in the atmosphere" — otherwise no chute could ever
+          // open there.
+          const atm = v.body.atmosphere;
+          const semi = chute.semiPressure * (atm ? Math.min(1, atm.seaLevelPressure / 101_325) : 1);
+          if (atm && v.staticPressure > semi && v.airVelocity.length() > 1) {
             if (q > chute.maxQ * 1.6) {
               p.chuteState = 'cut';
               this.emit('chute-torn', v, `${p.def.name} shredded — too fast to deploy`, p);
@@ -296,16 +322,15 @@ export class VesselPhysics {
   }
 
   private fuelAvailable(v: Vessel, p: FlightPart): number {
-    if (p.isSolid) return p.fuel;
-    const prop = p.def.engine!.propellant;
-    let total = 0;
-    for (const t of v.parts) if (t.group === p.group && t.propellant === prop && !t.isSolid) total += t.fuel;
-    return total;
+    return v.engineFuel(p);
   }
 
   private applyEngines(v: Vessel, dt: number, cmd: ControlCommand): void {
     const pAtm = v.staticPressure;
-    const pSL = v.body.atmosphere ? v.body.atmosphere.seaLevelPressure : 101325;
+    // Sea-level Isp in the catalogue is measured at Earth's 101,325 Pa; the
+    // back-pressure loss scales with the actual ambient pressure — on Mars
+    // (610 Pa) it is under 1 % of the Earth loss, not the full loss.
+    const pSL = 101_325;
     let total = 0;
     let maxNow = 0;
     const com = v.com;
@@ -352,7 +377,7 @@ export class VesselPhysics {
       const ispSL = p.stats.ispSL;
       const mdotMax = thrustVacMax / (ispVac * G0);
       const mdot = mdotMax * p.engineThrottle;
-      if (p.engineRunning || p.isSolid) maxNow += thrustVacMax;
+      if (p.engineRunning || (p.isSolid && p.fuel > 0)) maxNow += thrustVacMax;
       if (mdot <= 0) {
         p.thrust = 0;
         p.massFlow = 0;
@@ -446,7 +471,7 @@ export class VesselPhysics {
   // ---------------------------------------------------------------------------
   private applyAero(v: Vessel): void {
     const rho = v.airDensity;
-    _vAir.copy(v.surfaceVelocity);
+    _vAir.copy(v.airVelocity);
     _vAirL.copy(_vAir).applyQuaternion(_qInv);
     const speed = _vAirL.length();
     if (speed < 0.01) return;
@@ -558,7 +583,7 @@ export class VesselPhysics {
 
   // ---------------------------------------------------------------------------
   private applyThermal(v: Vessel, dt: number): void {
-    const speed = v.surfaceVelocity.length();
+    const speed = v.airVelocity.length();
     const rho = v.airDensity;
     const flux = rho > 1e-10 && speed > 600 ? SUTTON_GRAVES_K * Math.sqrt(rho / Math.max(0.5, v.refRadius)) * speed * speed * speed : 0;
     v.heatFlux = flux;
@@ -566,7 +591,7 @@ export class VesselPhysics {
     // Direction of motion in the vessel frame
     let sMax = -Infinity;
     if (flux > 0) {
-      _tmp.copy(v.surfaceVelocity).applyQuaternion(_qInv).normalize();
+      _tmp.copy(v.airVelocity).applyQuaternion(_qInv).normalize();
       for (const p of v.parts) {
         if (p.shielded) continue;
         const s = _tmp.dot(p.position) + p.radius * 0.2 + (p.height / 2) * Math.abs(_tmp.y);
@@ -607,7 +632,7 @@ export class VesselPhysics {
   }
 
   // ---------------------------------------------------------------------------
-  private applyContacts(v: Vessel): void {
+  private applyContacts(v: Vessel, dt: number): void {
     const body = v.body;
     v.touchingGround = false;
     v.inWater = false;
@@ -647,21 +672,42 @@ export class VesselPhysics {
       if (-vn > tol && !c.part.destroyed) {
         this.destroyQueue.push({ vessel: v, part: c.part, reason: 'crash', speed: -vn });
       }
+      // Explicit integration is only stable if a damping or friction force cannot
+      // reverse the contact point's velocity within one step. A foot on a long leg
+      // has a tiny effective mass in rotation (I/R²), so the nominal damper would
+      // overshoot and pump energy into the rocking motion until the legs "crash".
+      // Cap every velocity-proportional force at the impulse that just zeroes the
+      // point's relative velocity, shared between the contacts of this step.
+      _rL.copy(c.pos).sub(v.com);
+      _nL.copy(_n).applyQuaternion(_qInv);
+      const capN = this.contactForceCap(v, _rL, _nL, Math.abs(vn), dt, count);
       let fn: number;
       if (water) {
         v.inWater = true;
         const kw = kPt * 0.25;
-        fn = kw * Math.min(pen, 4) - cPt * 1.5 * vn;
+        fn = kw * Math.min(pen, 4) + clamp(-cPt * 1.5 * vn, -capN, capN);
         // water drag
         _vp.addScaledVector(_n, -vn);
-        _F.copy(_vp).multiplyScalar(-mEff * 0.8);
+        const vt = _vp.length();
+        let drag = mEff * 0.8 * vt;
+        if (vt > 1e-6) {
+          _tL.copy(_vp).multiplyScalar(1 / vt).applyQuaternion(_qInv);
+          drag = Math.min(drag, this.contactForceCap(v, _rL, _tL, vt, dt, count));
+          _F.copy(_vp).multiplyScalar(-drag / vt);
+        } else _F.set(0, 0, 0);
       } else {
         v.touchingGround = true;
         const legK = c.leg ? 0.45 : 1;
-        fn = kPt * legK * pen - cPt * (c.leg ? 1.3 : 1) * vn;
+        fn = kPt * legK * pen + clamp(-cPt * (c.leg ? 1.3 : 1) * vn, -capN, capN);
         _vp.addScaledVector(_n, -vn);
         const vt = _vp.length();
-        _F.copy(_vp).multiplyScalar((-CONTACT_FRICTION * Math.max(0, fn)) / Math.max(vt, 0.25));
+        // Coulomb friction, viscous below 0.25 m/s so a resting vehicle does not jitter
+        let fric = (CONTACT_FRICTION * Math.max(0, fn) * vt) / Math.max(vt, 0.25);
+        if (vt > 1e-6) {
+          _tL.copy(_vp).multiplyScalar(1 / vt).applyQuaternion(_qInv);
+          fric = Math.min(fric, this.contactForceCap(v, _rL, _tL, vt, dt, count));
+          _F.copy(_vp).multiplyScalar(-fric / vt);
+        } else _F.set(0, 0, 0);
       }
       if (fn < 0) fn = 0;
       _F.addScaledVector(_n, fn);
@@ -671,6 +717,20 @@ export class VesselPhysics {
       this.nonGravForce = true;
     }
     v.lastContactCount = Math.max(3, contacts);
+  }
+
+  /**
+   * Largest velocity-proportional force a contact may apply along `dLocal`
+   * (vessel frame) this step: the point's inverse effective mass along d is
+   * K = 1/m + (r×d)·I⁻¹(r×d), so an impulse F·dt changes its speed by F·dt·K;
+   * F ≤ speed/(dt·K) can at most cancel the relative motion, and dividing by the
+   * number of contacts keeps their sum within that bound too.
+   */
+  private contactForceCap(v: Vessel, rLocal: Vector3, dLocal: Vector3, speed: number, dt: number, count: number): number {
+    _rx.crossVectors(rLocal, dLocal);
+    _Ir.copy(_rx).applyMatrix3(v.invInertia);
+    const K = 1 / v.mass + _rx.dot(_Ir);
+    return speed / (dt * K * count);
   }
 
   private terrainNormal(body: Vessel['body'], dirBF: Vector3, h0: number, out: Vector3): void {

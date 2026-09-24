@@ -168,6 +168,7 @@ export class VABState implements GameState {
   private readonly undoBtn: HTMLButtonElement;
   private readonly redoBtn: HTMLButtonElement;
   private readonly overlay: HTMLDivElement;
+  private readonly touchBar: HTMLDivElement;
   private readonly cleanup: Array<() => void> = [];
 
   constructor(ctx: GameContext, params: VABParams) {
@@ -179,7 +180,7 @@ export class VABState implements GameState {
     this.maxTier = this.unlockedTier();
     this.craft = this.initialCraft();
     this.camera = ctx.renderer.camera;
-    this.vab = new VABScene(ctx.renderer.gl, ctx.assets);
+    this.vab = new VABScene(ctx.renderer.gl, ctx.assets, { enabled: ctx.renderer.shadowsEnabled, size: ctx.renderer.shadowSize });
     this.atmFrame = { ...ctx.space.atmFrame, enabled: false, cloudsEnabled: false };
     this.compFrame = {
       exposure: 1.05,
@@ -224,6 +225,7 @@ export class VABState implements GameState {
         this.redoBtn,
         h('span', { class: 'vab-sep' }),
         this.symBtn,
+        h('button', { class: 'btn small vab-stats-toggle', text: 'Δv', title: 'Vehicle stats & staging', onClick: () => this.root.classList.toggle('show-right') }),
       ),
       h('button', { class: 'btn primary vab-launch', text: 'Launch ▸', onClick: () => this.showLaunch() }),
     );
@@ -245,7 +247,16 @@ export class VABState implements GameState {
       ),
       this.inspector,
     );
-    this.root = h('div', { class: 'vab' }, top, left, right, this.hint, this.overlay);
+    // Touch: actions for the selected / held part (no keyboard shortcuts on a phone)
+    const tb = (label: string, title: string, fn: () => void, cls = '') => h('button', { class: `btn small ${cls}`, text: label, title, onClick: () => (ctx.platform.haptic('tick'), fn()) });
+    this.touchBar = h('div', { class: 'vab-touchbar card' },
+      tb('Move', 'Pick up the selected part', () => this.grabSelected(), 'sel'),
+      tb('Copy', 'Duplicate the selected part', () => this.duplicateSelected(), 'sel'),
+      tb('Delete', 'Delete the selected part', () => this.deleteSelected(), 'sel danger'),
+      tb('Drop', 'Put the held part back', () => this.dropHeld(), 'hold'),
+      tb('Symmetry', 'Cycle radial symmetry', () => this.cycleSymmetry(), 'hold'),
+    );
+    this.root = h('div', { class: `vab${ctx.platform.touch ? ' touch' : ''}` }, top, left, right, this.hint, this.touchBar, this.overlay);
     if (m) {
       right.prepend(
         h('div', { class: 'card vab-mission' },
@@ -276,6 +287,8 @@ export class VABState implements GameState {
       this.pointerDirty = true;
     };
     const onUp = (e: PointerEvent) => {
+      // Finger taps are recognised by Input (it also filters out pinches)
+      if (e.pointerType === 'touch') return;
       if (this.downButton !== e.button) return;
       const moved = Math.hypot(e.clientX - this.downX, e.clientY - this.downY);
       this.downButton = -1;
@@ -292,6 +305,16 @@ export class VABState implements GameState {
       canvas.removeEventListener('pointerup', onUp);
     });
     this.cleanup.push(ctx.input.onKey((code, e) => this.onKey(code, e)));
+    this.cleanup.push(
+      ctx.platform.pushBack(() => {
+        if (this.overlay.style.display !== 'none') this.hideOverlay();
+        else if (this.root.classList.contains('show-right')) this.root.classList.remove('show-right');
+        else if (this.held) this.dropHeld();
+        else if (this.selected !== null) this.select(null);
+        else this.exit();
+        return true;
+      }),
+    );
 
     this.rebuild(true);
     this.frameCraft(true);
@@ -618,10 +641,14 @@ export class VABState implements GameState {
     if (hd) {
       const def = getPartDef(hd.parts.find((p) => p.uid === hd.root)!.defId);
       const extra = hd.parts.length > 1 ? ` (+${hd.parts.length - 1} attached)` : '';
-      setText(this.hint, `Holding ${def.name}${extra} · click a glowing node${caps?.radial ? ' or a surface' : ''} to attach · Shift keeps holding · right-click / Esc to drop`);
+      if (this.ctx.platform.touch) setText(this.hint, `Holding ${def.name}${extra} · tap a glowing node${caps?.radial ? ' or a surface' : ''} to attach`);
+      else setText(this.hint, `Holding ${def.name}${extra} · click a glowing node${caps?.radial ? ' or a surface' : ''} to attach · Shift keeps holding · right-click / Esc to drop`);
+    } else if (this.ctx.platform.touch) {
+      setText(this.hint, 'Tap a part in the list, then a glowing node · tap the rocket to select · drag to rotate · pinch to zoom · two fingers to pan');
     } else {
       setText(this.hint, 'Click a part in the catalog to pick it up · click the rocket to select · G grab · Ctrl+D duplicate · Del delete · X symmetry · drag to orbit · wheel to zoom · Shift-drag to pan');
     }
+    this.updateTouchBar();
   }
 
   private heldHeight(): number {
@@ -882,6 +909,15 @@ export class VABState implements GameState {
     this.selected = uid;
     this.refreshInspector();
     this.refreshStages();
+    this.updateTouchBar();
+  }
+
+  private updateTouchBar(): void {
+    const bar = this.touchBar;
+    if (!bar) return;
+    const mode = this.held ? 'hold' : this.selected !== null ? 'sel' : '';
+    bar.dataset.mode = mode;
+    bar.style.display = mode && this.ctx.platform.touch ? '' : 'none';
   }
 
   // =================================================================== files
@@ -1113,7 +1149,7 @@ export class VABState implements GameState {
     this.hovered = null;
     const w = window.innerWidth;
     const hh = window.innerHeight;
-    const node = this.vab.pickNode(this.nodes, this.camera, this.pointerX, this.pointerY, w, hh);
+    const node = this.vab.pickNode(this.nodes, this.camera, this.pointerX, this.pointerY, w, hh, this.ctx.input.lastTouch ? 64 : 42);
     let radial: RadialTarget | null = null;
     const caps = this.heldCaps()!;
     if (!node && caps.radial) {
@@ -1194,6 +1230,19 @@ export class VABState implements GameState {
     const inp = this.ctx.input;
     const drag = inp.takeDrag();
     const wheel = inp.takeWheel();
+    const pan = inp.takePan();
+    if (pan.dy) {
+      // Two-finger drag slides the view up and down the rocket
+      this.focusTarget = Math.max(0.5, Math.min(this.vab.bounds.max.y + 5, this.focusTarget + pan.dy * this.dist * 0.0022));
+      this.pointerDirty = true;
+    }
+    for (const tap of inp.takeTaps()) {
+      if (!tap.touch) continue;
+      this.pointerX = tap.x;
+      this.pointerY = tap.y;
+      this.updateHover();
+      this.click();
+    }
     if (drag.dx || drag.dy) {
       if (inp.shift || inp.dragButton === 1) {
         this.focusTarget = Math.max(0.5, Math.min(this.vab.bounds.max.y + 5, this.focusTarget + drag.dy * this.dist * 0.0022));

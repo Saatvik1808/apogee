@@ -88,6 +88,8 @@ let nextVesselId = 1;
 
 const _v = new Vector3();
 const _v2 = new Vector3();
+const _v3 = new Vector3();
+const _inertia = new Float64Array(9);
 
 export class Vessel {
   readonly id: number;
@@ -164,6 +166,10 @@ export class Vessel {
   radarAltitude = 0;
   terrainHeight = 0;
   readonly surfaceVelocity = new Vector3();
+  /** Local wind (inertial frame, relative to the rotating surface). */
+  readonly wind = new Vector3();
+  /** Velocity relative to the moving air = surface velocity − wind (drives aerodynamics). */
+  readonly airVelocity = new Vector3();
   verticalSpeed = 0;
   horizontalSpeed = 0;
   mach = 0;
@@ -283,6 +289,42 @@ export class Vessel {
       for (const c of p.children) visit(c, c.def.decoupler ? ++next : g);
     };
     visit(this.root, 0);
+  }
+
+  /**
+   * Propellant (kg) an engine can still draw: its own grain for a solid, otherwise
+   * the matching propellant in every tank of its fuel-flow group (decouplers
+   * separate groups, so a stage cannot drink from the tanks below it).
+   */
+  engineFuel(p: FlightPart): number {
+    if (p.isSolid) return p.fuel;
+    const e = p.def.engine;
+    if (!e) return 0;
+    let total = 0;
+    for (const t of this.parts) if (t.group === p.group && t.propellant === e.propellant && !t.isSolid) total += t.fuel;
+    return total;
+  }
+
+  /** True if any stage still to be activated contains an engine that has propellant. */
+  hasEngineInLaterStage(): boolean {
+    for (let i = this.nextStage; i < this.stages.length; i++) {
+      for (const uid of this.stages[i]!) {
+        const p = this.partByUid(uid);
+        if (p && p.isEngine && this.engineFuel(p) > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Drop stages that lost all their parts (destroyed or decoupled with another
+   * section): pressing STAGE on an empty one would otherwise do nothing, and the
+   * autopilot could never get past it.
+   */
+  pruneEmptyStages(): void {
+    for (let i = this.stages.length - 1; i >= this.nextStage; i--) {
+      if (this.stages[i]!.length === 0) this.stages.splice(i, 1);
+    }
   }
 
   private computeShielding(): void {
@@ -531,15 +573,15 @@ export class Vessel {
       // shift = newCOM - oldCOM (vessel frame) → move r and v consistently
       const shift = _v2.copy(c).sub(this.com);
       if (shift.lengthSq() > 0) {
-        const wShift = new Vector3().crossVectors(this.w, shift).applyQuaternion(this.q);
+        const wShift = _v3.crossVectors(this.w, shift).applyQuaternion(this.q);
         this.r.add(shift.applyQuaternion(this.q));
         this.v.add(wShift);
       }
     }
     this.com.copy(c);
     this.mass = m;
-    // Inertia tensor about COM
-    const e = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Inertia tensor about COM (scratch array: this runs every physics step)
+    const e = _inertia.fill(0);
     for (const p of this.parts) {
       const pm = Math.max(p.mass, 0.01);
       const r = p.radius;
@@ -623,7 +665,10 @@ export class Vessel {
       child.v.addScaledVector(axis, (-sepDv * mThis) / total);
     }
     // Remove moved parts from remaining stages
-    this.stages = this.stages.map((s) => s.filter((u) => !moving.some((x) => x.uid === u)));
+    const movedUids = new Set<number>();
+    for (const x of moving) movedUids.add(x.uid);
+    this.stages = this.stages.map((s) => s.filter((u) => !movedUids.has(u)));
+    this.pruneEmptyStages();
     this.refreshStructure();
     child.refreshStructure();
     return child;

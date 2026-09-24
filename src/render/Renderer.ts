@@ -39,6 +39,9 @@ export class Renderer {
   /** true: reversed-Z float depth; false: logarithmic depth (fallback). */
   readonly reversedDepth: boolean;
   pixelRatio = 1;
+  /** Shadow-map resolution chosen by the quality preset. */
+  shadowSize = 2048;
+  shadowsEnabled = true;
   resolutionScale = 1;
   width = 1;
   height = 1;

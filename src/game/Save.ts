@@ -10,8 +10,22 @@
  */
 import type { CraftData } from '../parts/Craft';
 
+export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra';
+export type Level3 = 'low' | 'medium' | 'high';
+export type Level4 = 'low' | 'medium' | 'high' | 'ultra';
+
 export interface Settings {
-  quality: 'low' | 'medium' | 'high' | 'ultra';
+  /** A named preset fills in every graphics field below; 'custom' keeps the player's own mix. */
+  quality: QualityPreset | 'custom';
+  /** Internal resolution in CSS-pixel multiples (1 = one render pixel per CSS pixel). */
+  renderScale: number;
+  /** Lower the resolution automatically when the frame rate drops. */
+  dynamicResolution: boolean;
+  textures: 'low' | 'standard' | 'high';
+  shadows: 'off' | 'low' | 'high';
+  atmosphere: Level4;
+  terrain: Level4;
+  effects: Level3;
   master: number;
   music: number;
   sfx: number;
@@ -20,13 +34,22 @@ export interface Settings {
   bloom: boolean;
   grain: boolean;
   showFps: boolean;
+  /** On-screen flight controls: follow the device, or force on/off. */
+  touchControls: 'auto' | 'on' | 'off';
+  haptics: boolean;
+  /** Frame-rate cap (0 = display refresh rate). 30 saves battery on phones. */
+  frameCap: 0 | 30 | 60;
+  /** Joystick sensitivity multiplier for touch steering. */
+  stickSensitivity: number;
 }
 
 export interface CampaignProgress {
   completed: string[];
-  /** Best score per mission id. */
+  /** Best star rating (1–3) per mission id. */
   scores: Record<string, number>;
   funds: number;
+  /** Story scenes already shown (chapter intros), so they play once. */
+  storySeen: string[];
 }
 
 export interface SaveData {
@@ -43,9 +66,16 @@ export function defaultSave(): SaveData {
   return {
     version: 1,
     crafts: [],
-    campaign: { completed: [], scores: {}, funds: 0 },
+    campaign: { completed: [], scores: {}, funds: 0, storySeen: [] },
     settings: {
       quality: 'high',
+      renderScale: 1.5,
+      dynamicResolution: false,
+      textures: 'high',
+      shadows: 'high',
+      atmosphere: 'high',
+      terrain: 'high',
+      effects: 'high',
       master: 0.8,
       music: 0.45,
       sfx: 0.9,
@@ -54,9 +84,22 @@ export function defaultSave(): SaveData {
       bloom: true,
       grain: true,
       showFps: false,
+      touchControls: 'auto',
+      haptics: true,
+      frameCap: 0,
+      stickSensitivity: 1,
     },
     lastCraft: null,
   };
+}
+
+/** True when a save already exists (first launch otherwise). */
+export function hasSave(): boolean {
+  try {
+    return localStorage.getItem(KEY) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function loadSave(): SaveData {

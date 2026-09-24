@@ -151,6 +151,12 @@ void main() {
 export interface PostSettings {
   bloom: boolean;
   bloomStrength: number;
+  /**
+   * Extra downscale of the bloom pyramid (1 = three's default half resolution).
+   * Bloom is a blur, so phones can run it at quarter resolution (2) for a
+   * quarter of the fill-rate cost with no visible difference.
+   */
+  bloomScale: number;
   fxaa: boolean;
   atmosphereSteps: number;
   grain: number;
@@ -186,6 +192,7 @@ export class PostFX {
   readonly settings: PostSettings = {
     bloom: true,
     bloomStrength: 0.45,
+    bloomScale: 1,
     fxaa: true,
     atmosphereSteps: 24,
     grain: 0.025,
@@ -288,13 +295,21 @@ void main() {
     this.ldrRT.setSize(this.width, this.height);
     this.transRT.setSize(this.width, this.height);
     this.resizeAtm();
-    this.bloom.setSize(this.width, this.height);
+    this.resizeBloom();
     (this.fxaa.uniforms.resolution!.value as Vector2).set(1 / this.width, 1 / this.height);
     this.composite.uniforms.uAspect!.value = this.width / this.height;
   }
 
+  private bloomScaleApplied = 1;
+
+  private resizeBloom(): void {
+    const s = Math.max(1, this.settings.bloomScale);
+    this.bloomScaleApplied = s;
+    this.bloom.setSize(Math.max(2, Math.ceil(this.width / s)), Math.max(2, Math.ceil(this.height / s)));
+  }
+
   /** Ray-march resolution divisor: 1 = full resolution (ultra), 2 = half. */
-  setAtmosphereScale(scale: 1 | 2): void {
+  setAtmosphereScale(scale: 1 | 2 | 3): void {
     if (scale === this.atmScale) return;
     this.atmScale = scale;
     this.resizeAtm();
@@ -356,6 +371,7 @@ void main() {
 
     // 4. Bloom (adds into rtA)
     if (s.bloom) {
+      if (s.bloomScale !== this.bloomScaleApplied) this.resizeBloom();
       this.bloom.strength = s.bloomStrength;
       this.bloom.render(r, this.rtA, this.rtA, 0, false);
     }

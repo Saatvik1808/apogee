@@ -78,6 +78,17 @@ export class AudioEngine {
   private musicIntensity = 1;
   private lastSpoken = new Map<string, number>();
 
+  /** App sent to the background: stop all sound (and the audio thread). */
+  suspend(): void {
+    if (this.ctx && this.ctx.state === 'running') void this.ctx.suspend();
+    if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  }
+
+  /** App back in the foreground. */
+  resume(): void {
+    if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume();
+  }
+
   /** Must be called from a user gesture. */
   unlock(): void {
     if (this.ctx) {
@@ -197,10 +208,10 @@ export class AudioEngine {
     this.windGain.gain.setTargetAtTime(0, t, 0.3);
   }
 
-  private burst(freq: number, q: number, dur: number, gain: number, type: BiquadFilterType = 'lowpass', sweepTo?: number): void {
+  private burst(freq: number, q: number, dur: number, gain: number, type: BiquadFilterType = 'lowpass', sweepTo?: number, delay = 0): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const t = ctx.currentTime;
+    const t = ctx.currentTime + delay;
     const src = ctx.createBufferSource();
     src.buffer = this.white;
     const f = ctx.createBiquadFilter();
@@ -217,10 +228,10 @@ export class AudioEngine {
     src.stop(t + dur + 0.05);
   }
 
-  private tone(freq: number, dur: number, gain: number, type: OscillatorType = 'sine', slideTo?: number): void {
+  private tone(freq: number, dur: number, gain: number, type: OscillatorType = 'sine', slideTo?: number, delay = 0): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const t = ctx.currentTime;
+    const t = ctx.currentTime + delay;
     const o = ctx.createOscillator();
     o.type = type;
     o.frequency.setValueAtTime(freq, t);
@@ -250,6 +261,41 @@ export class AudioEngine {
     this.burst(500, 1, 0.25, 0.4, 'lowpass', 100);
   }
 
+  splash(): void {
+    this.burst(1200, 0.6, 1.4, 0.7, 'lowpass', 150);
+    this.burst(3000, 0.8, 0.5, 0.35, 'bandpass', 800);
+    this.tone(50, 0.5, 0.5, 'sine', 30);
+  }
+
+  /**
+   * Sonic boom: the classic double "boom-boom" — the bow shock and the tail
+   * shock arrive ~0.1 s apart. Quieter and duller with distance, like thunder.
+   */
+  sonicBoom(distance: number): void {
+    const att = 1 / (1 + Math.max(0, distance - 200) / 3000);
+    const g = 0.9 * att;
+    const cut = 300 + 1500 * att;
+    this.burst(cut, 0.6, 0.35, g, 'lowpass', 60);
+    this.tone(48, 0.4, 0.8 * att, 'sine', 28);
+    this.burst(cut, 0.6, 0.35, g * 0.8, 'lowpass', 60, 0.11);
+    this.tone(44, 0.4, 0.6 * att, 'sine', 26, 0.11);
+  }
+
+  private alarmTimer = 0;
+
+  /** Master alarm: repeating two-tone warble while `on`. Call every frame. */
+  updateAlarm(on: boolean, dt: number): void {
+    if (!on) {
+      this.alarmTimer = 0;
+      return;
+    }
+    this.alarmTimer -= dt;
+    if (this.alarmTimer > 0) return;
+    this.alarmTimer = 0.75;
+    this.tone(880, 0.16, 0.22, 'triangle');
+    this.tone(660, 0.18, 0.22, 'triangle', undefined, 0.18);
+  }
+
   chute(): void {
     this.burst(900, 0.6, 1.2, 0.5, 'bandpass', 300);
   }
@@ -260,6 +306,11 @@ export class AudioEngine {
 
   beep(high = false): void {
     this.tone(high ? 1320 : 880, 0.12, 0.2, 'square');
+  }
+
+  /** Quindar tone: 2,525 Hz keys a transmission on, 2,475 Hz keys it off (Apollo). */
+  quindar(start: boolean): void {
+    this.tone(start ? 2525 : 2475, 0.25, 0.07, 'sine');
   }
 
   ignition(): void {
@@ -336,5 +387,10 @@ export class AudioEngine {
 
   cancelSpeech(): void {
     if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  }
+
+  /** A new flight starts: every call-out may be spoken again ("Liftoff!" after a quick revert). */
+  resetCallouts(): void {
+    this.lastSpoken.clear();
   }
 }

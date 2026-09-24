@@ -5,19 +5,29 @@
   "type": "module",
   "description": "APOGEE — a real-scale rocket building and spaceflight game for the browser",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5190",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 5191",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:android-web": "tsc --noEmit && node scripts/build-android-web.mjs",
+    "android:sync": "npm run build:android-web && npx cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleRelease",
+    "android:aab": "npm run android:sync && cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/splash-screen": "^8.0.2",
     "three": "^0.186.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "@types/three": "^0.186.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.0",

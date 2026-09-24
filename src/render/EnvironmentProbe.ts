@@ -96,6 +96,10 @@ export class EnvironmentProbe {
       fragmentShader: frag,
       side: BackSide,
       depthWrite: false,
+      // A skybox needs no depth test — and with autoClear off the cube target's
+      // depth is never cleared in the logarithmic-depth fallback, which would
+      // reject every sky pixel and leave the environment map black
+      depthTest: false,
       uniforms: {
         uUp: { value: new Vector3(0, 1, 0) },
         uSunDir: { value: new Vector3(0, 1, 0) },
@@ -113,11 +117,26 @@ export class EnvironmentProbe {
     this.pmrem = new PMREMGenerator(renderer);
   }
 
+  /**
+   * Advance the refresh timer; true when the probe wants re-rendering (at most
+   * every `interval` seconds, and always until the first render has happened).
+   * Callers compute the (allocation-heavy) environment parameters only then.
+   */
+  due(dt: number, interval = 0.4): boolean {
+    this.timer -= dt;
+    if (this.timer > 0 && this.pmremRT) return false;
+    this.timer = interval;
+    return true;
+  }
+
   /** Re-render at most every `interval` seconds. Returns the current env texture. */
   update(p: EnvParams, dt: number, interval = 0.4): Texture | null {
-    this.timer -= dt;
-    if (this.timer > 0 && this.pmremRT) return this.pmremRT.texture;
-    this.timer = interval;
+    if (!this.due(dt, interval)) return this.pmremRT ? this.pmremRT.texture : null;
+    return this.render(p);
+  }
+
+  /** Render the six faces and pre-filter them now. */
+  render(p: EnvParams): Texture {
     const u = this.mat.uniforms;
     (u.uUp!.value as Vector3).copy(p.up);
     (u.uSunDir!.value as Vector3).copy(p.sunDir);

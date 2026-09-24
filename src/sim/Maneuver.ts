@@ -36,6 +36,8 @@ export interface ManeuverNode {
   readonly remaining: Vector3;
   /** True once the burn has started (throttle applied near the node). */
   burning: boolean;
+  /** Simulation time the engines were last seen running for this burn (NaN: never). */
+  lastThrust: number;
   /** Specific orbital energy of the planned post-burn orbit (J/kg). */
   targetEnergy: number;
   /**
@@ -57,6 +59,9 @@ const _p = new Vector3();
 const _n = new Vector3();
 const _rad = new Vector3();
 
+const _d = new Vector3();
+const _n2 = new Vector3();
+
 export function createNode(time: number, body: CelestialBody): ManeuverNode {
   return {
     id: nextNodeId++,
@@ -68,6 +73,7 @@ export function createNode(time: number, body: CelestialBody): ManeuverNode {
     targetVelocity: new Vector3(),
     remaining: new Vector3(),
     burning: false,
+    lastThrust: NaN,
     targetEnergy: 0,
     guidance: 'match',
   };
@@ -102,14 +108,18 @@ export function refreshNodeTarget(node: ManeuverNode, orbit: Orbit): void {
  *    (horizontal, √(μ/r)) — kills radial speed however long the burn lasts.
  */
 export function updateNodeRemaining(node: ManeuverNode, orbit: Orbit, r?: Vector3, v?: Vector3): Vector3 {
-  if (node.burning && r && v && node.guidance !== 'match') {
+  if (node.guidance === 'energy' && r && v) {
+    // Energy guidance (before and during the burn): along the CURRENT velocity,
+    // tilted out of the orbit plane by the node's normal/prograde ratio, sized by
+    // the orbital energy still missing. The planner simulates exactly this law.
     const speed = v.length();
-    if (node.guidance === 'energy') {
-      const eps = (speed * speed) / 2 - orbit.mu / r.length();
-      const d = (node.targetEnergy - eps) / Math.max(speed, 1);
-      if (Math.sign(node.prograde) * d <= 0) return node.remaining.set(0, 0, 0);
-      return node.remaining.copy(v).multiplyScalar(d / Math.max(speed, 1e-6));
-    }
+    const eps = (speed * speed) / 2 - orbit.mu / r.length();
+    const d = (node.targetEnergy - eps) / Math.max(speed, 1);
+    if (node.burning && Math.sign(node.prograde) * d <= 0) return node.remaining.set(0, 0, 0);
+    energyDirection(r, v, node.prograde !== 0 ? node.normal / node.prograde : 0, _d);
+    return node.remaining.copy(_d).multiplyScalar(d);
+  }
+  if (node.burning && r && v && node.guidance !== 'match') {
     const rl = r.length();
     _r.copy(r).multiplyScalar(1 / rl);
     _v.copy(v).addScaledVector(_r, -v.dot(_r));
@@ -122,6 +132,46 @@ export function updateNodeRemaining(node: ManeuverNode, orbit: Orbit, r?: Vector
   return node.remaining.copy(node.targetVelocity).sub(_v);
 }
 
+/** Unit thrust direction of an energy-guided burn: prograde + tilt · orbit normal. */
+export function energyDirection(r: Vector3, v: Vector3, tilt: number, out: Vector3): Vector3 {
+  _n2.crossVectors(r, v);
+  const nl = _n2.length();
+  out.copy(v).normalize();
+  if (nl > 1e-9 && tilt !== 0) out.addScaledVector(_n2, tilt / nl).normalize();
+  return out;
+}
+
+/**
+ * Thrust (N) and mass flow (kg/s) of the engines a node burn would use: the
+ * ignited engines that still have propellant — or, when none of those can burn,
+ * the engines of the next stage (which staging would light). Dry engines must
+ * not count: a spent booster still attached would otherwise make the burn look
+ * several times shorter than it is, and the burn would start late.
+ */
+export function burnEngines(v: Vessel): { thrust: number; mdot: number } {
+  let thrust = 0;
+  let mdot = 0;
+  for (const p of v.parts) {
+    if (!p.isEngine || !p.engineIgnited) continue;
+    if (p.flameout && !p.engineRunning && p.ignitionsLeft <= 0) continue;
+    if (v.engineFuel(p) <= 0) continue;
+    thrust += p.stats.thrustVac;
+    mdot += p.stats.thrustVac / (p.stats.ispVac * G0);
+  }
+  if (thrust <= 0) {
+    const next = v.stages[v.nextStage];
+    if (next) {
+      for (const uid of next) {
+        const p = v.partByUid(uid);
+        if (!p || !p.isEngine || v.engineFuel(p) <= 0) continue;
+        thrust += p.stats.thrustVac;
+        mdot += p.stats.thrustVac / (p.stats.ispVac * G0);
+      }
+    }
+  }
+  return { thrust, mdot };
+}
+
 /** Post-burn state at the node (for trajectory prediction). */
 export function nodeStateAfter(node: ManeuverNode, orbit: Orbit, outR: Vector3, outV: Vector3): void {
   orbit.getStateAt(node.time, outR, outV);
@@ -129,18 +179,17 @@ export function nodeStateAfter(node: ManeuverNode, orbit: Orbit, outR: Vector3, 
 }
 
 /** Estimated burn duration for Δv with the vessel's currently available engines. */
+/**
+ * How long before the node a burn must start so that half its Δv is delivered
+ * before the node (the right centring for long burns), plus a safety margin.
+ */
+export function burnLeadTime(v: Vessel, dv: number, margin = 45): number {
+  const lead = estimateBurnTime(v, dv / 2);
+  return (isFinite(lead) ? lead : 0) + margin;
+}
+
 export function estimateBurnTime(v: Vessel, dv: number): number {
-  let thrust = 0;
-  let mdot = 0;
-  for (const p of v.parts) {
-    if (!p.isEngine) continue;
-    const next = v.stages[v.nextStage] ?? [];
-    const active = p.engineIgnited || (p.fuel === 0 && next.includes(p.uid));
-    if (!active) continue;
-    if (p.flameout && !p.engineRunning && p.ignitionsLeft <= 0) continue;
-    thrust += p.stats.thrustVac;
-    mdot += p.stats.thrustVac / (p.stats.ispVac * G0);
-  }
+  const { thrust, mdot } = burnEngines(v);
   if (thrust <= 0 || mdot <= 0) return NaN;
   const ve = thrust / mdot;
   const m0 = v.mass;

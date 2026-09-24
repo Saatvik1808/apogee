@@ -32,6 +32,7 @@ const _m = new Matrix4();
 const _q = new Quaternion();
 const _tmp = new Vector3();
 const ZERO = new Vector3();
+const Y_UP = new Vector3(0, 1, 0);
 
 export class FlightCamera {
   mode: CameraMode = 'chase';
@@ -42,6 +43,8 @@ export class FlightCamera {
   minDistance = 3;
   fov = 55;
   shake = 0;
+  /** One-off jolt (staging, touchdown, nearby explosion); decays in ~0.3 s. */
+  impulse = 0;
   /** Absolute camera position. */
   readonly position = new Vector3();
   readonly quaternion = new Quaternion();
@@ -72,7 +75,7 @@ export class FlightCamera {
       .addScaledVector(_up, Math.sin(p))
       .multiplyScalar(this.distance);
     this.position.copy(target).add(_off);
-    _m.lookAt(_off.clone().normalize(), ZERO, _up);
+    _m.lookAt(_tmp.copy(_off).normalize(), ZERO, _up);
     this.quaternion.setFromRotationMatrix(_m);
     this.applyShake(dt);
   }
@@ -91,10 +94,17 @@ export class FlightCamera {
     this.applyShake(dt);
   }
 
+  /** Add a jolt; repeated kicks stack up to a cap. */
+  kick(amount: number): void {
+    this.impulse = Math.min(3, this.impulse + amount);
+  }
+
   private applyShake(dt: number): void {
-    if (this.shake <= 1e-3) return;
+    this.impulse *= Math.exp(-dt * 7);
+    const total = this.shake + this.impulse;
+    if (total <= 1e-3) return;
     this.shakeT += dt;
-    const a = this.shake * 0.006;
+    const a = total * 0.006;
     const t = this.shakeT;
     const rx = (Math.sin(t * 37.1) + Math.sin(t * 61.7) * 0.5) * a;
     const ry = (Math.sin(t * 43.3 + 1.3) + Math.sin(t * 71.9) * 0.5) * a;
@@ -138,7 +148,7 @@ export class MapCamera {
     const p = (this.pitch * Math.PI) / 180;
     _off.set(Math.cos(p) * Math.sin(y), Math.sin(p), Math.cos(p) * Math.cos(y)).multiplyScalar(this.distance);
     this.position.copy(focusAbs).add(_off);
-    _m.lookAt(_off.clone().normalize(), ZERO, new Vector3(0, 1, 0));
+    _m.lookAt(_tmp.copy(_off).normalize(), ZERO, Y_UP);
     this.quaternion.setFromRotationMatrix(_m);
   }
 }

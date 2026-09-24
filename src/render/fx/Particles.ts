@@ -387,24 +387,31 @@ export class ParticleSystem {
     const gg = this.glowMesh.geometry as InstancedBufferGeometry;
     gs.instanceCount = ns;
     gg.instanceCount = ng;
-    this.smokeOffset.needsUpdate = true;
-    this.smokeColor.needsUpdate = true;
-    this.smokeParams.needsUpdate = true;
-    this.glowOffset.needsUpdate = true;
-    this.glowColor.needsUpdate = true;
-    this.glowParams.needsUpdate = true;
-    this.smokeOffset.clearUpdateRanges();
-    this.smokeOffset.addUpdateRange(0, ns * 3);
-    this.smokeColor.clearUpdateRanges();
-    this.smokeColor.addUpdateRange(0, ns * 4);
-    this.smokeParams.clearUpdateRanges();
-    this.smokeParams.addUpdateRange(0, ns * 3);
-    this.glowOffset.clearUpdateRanges();
-    this.glowOffset.addUpdateRange(0, ng * 3);
-    this.glowColor.clearUpdateRanges();
-    this.glowColor.addUpdateRange(0, ng * 4);
-    this.glowParams.clearUpdateRanges();
-    this.glowParams.addUpdateRange(0, ng * 3);
+    // Upload only the instances in use — and nothing at all for an empty
+    // category: an update range of length 0 means "the whole buffer" to WebGL,
+    // which re-uploaded 360 KB per frame for the (usually empty) glow mesh.
+    if (ns > 0) {
+      this.smokeOffset.needsUpdate = true;
+      this.smokeColor.needsUpdate = true;
+      this.smokeParams.needsUpdate = true;
+      this.smokeOffset.clearUpdateRanges();
+      this.smokeOffset.addUpdateRange(0, ns * 3);
+      this.smokeColor.clearUpdateRanges();
+      this.smokeColor.addUpdateRange(0, ns * 4);
+      this.smokeParams.clearUpdateRanges();
+      this.smokeParams.addUpdateRange(0, ns * 3);
+    }
+    if (ng > 0) {
+      this.glowOffset.needsUpdate = true;
+      this.glowColor.needsUpdate = true;
+      this.glowParams.needsUpdate = true;
+      this.glowOffset.clearUpdateRanges();
+      this.glowOffset.addUpdateRange(0, ng * 3);
+      this.glowColor.clearUpdateRanges();
+      this.glowColor.addUpdateRange(0, ng * 4);
+      this.glowParams.clearUpdateRanges();
+      this.glowParams.addUpdateRange(0, ng * 3);
+    }
     const su = this.smokeMat.uniforms;
     (su.uSunDir!.value as Vector3).copy(sunDir);
     (su.uSunColor!.value as Vector3).copy(sunColor);

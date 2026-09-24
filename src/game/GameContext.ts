@@ -17,6 +17,7 @@ import type { EnvironmentProbe } from '../render/EnvironmentProbe';
 import type { Input } from './Input';
 import type { AudioEngine } from '../audio/AudioEngine';
 import type { SaveData } from './Save';
+import type { Platform } from '../platform/Platform';
 
 export interface GameContext {
   renderer: Renderer;
@@ -28,8 +29,12 @@ export interface GameContext {
   input: Input;
   audio: AudioEngine;
   save: SaveData;
+  /** Device capabilities and native-shell services (haptics, Back button, lifecycle). */
+  platform: Platform;
   /** Root element for DOM UI layers. */
   ui: HTMLElement;
+  /** Texture tier uploaded at start-up (changing it needs a restart). */
+  textureTierLoaded: 'low' | 'standard' | 'high';
 }
 
 export interface GameState {

@@ -309,6 +309,8 @@ void main() {
   ivec2 fmax = ivec2(uFullSize) - 1;
   vec4 acc = vec4(0.0);
   float wsum = 0.0;
+  vec4 accB = vec4(0.0);
+  float wB = 0.0;
   float maxDiff = 0.0;
   float bestDiff = 1e9;
   vec4 best = vec4(0.0, 0.0, 0.0, 1.0);
@@ -324,12 +326,16 @@ void main() {
     maxDiff = max(maxDiff, diff);
     acc += a * w;
     wsum += w;
+    // Joint bilateral weight: bilinear × depth similarity (smooth edges, no bleeding)
+    float wd = w * exp(-diff * 40.0);
+    accB += a * wd;
+    wB += wd;
     if (diff < bestDiff) {
       bestDiff = diff;
       best = a;
     }
   }
-  vec4 atm = maxDiff < 0.06 ? acc / max(wsum, 1e-6) : best;
+  vec4 atm = maxDiff < 0.06 ? acc / max(wsum, 1e-6) : (wB > 1e-4 ? accB / wB : best);
 
   float cosFwd = max(1e-4, -dirView.z);
   float sceneDist = sky ? 1e30 : depthToViewZ(depth) / cosFwd;

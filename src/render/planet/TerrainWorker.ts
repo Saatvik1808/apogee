@@ -51,7 +51,14 @@ function drain(): void {
 self.onmessage = async (e: MessageEvent<InitMsg | BuildMsg | { type: 'cancel'; ids: number[] }>) => {
   const m = e.data;
   if (m.type === 'init') {
-    terrains = await loadTerrains(m.urls, m.radii, m.sites);
+    // A rejected promise inside a worker does not reach the main thread's
+    // `onerror`, so report load failures explicitly instead of going silent
+    try {
+      terrains = await loadTerrains(m.urls, m.radii, m.sites);
+    } catch (err) {
+      (self as unknown as DedicatedWorkerGlobalScope).postMessage({ type: 'error', error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     (self as unknown as DedicatedWorkerGlobalScope).postMessage({ type: 'ready' });
     drain();
   } else if (m.type === 'build') {

@@ -20,13 +20,26 @@ export class WorkerPool implements TerrainWorkerPool {
 
   constructor(count: number, urls: TerrainUrls, radii: { earth: number; moon: number; mars: number }, sites: FlatSiteSpec[]) {
     let resolveReady: () => void = () => undefined;
-    this.ready = new Promise((r) => (resolveReady = r));
+    let rejectReady: (e: Error) => void = () => undefined;
+    this.ready = new Promise((res, rej) => {
+      resolveReady = res;
+      rejectReady = rej;
+    });
     for (let i = 0; i < count; i++) {
       const w = new Worker(new URL('./TerrainWorker.ts', import.meta.url), { type: 'module' });
-      w.onmessage = (e: MessageEvent<{ type: string; res?: PatchResult }>) => {
+      // A worker that fails to start (script 404, unsupported module workers, an
+      // exception before it reports 'ready') would otherwise leave the loading
+      // screen waiting forever: surface it as a startup error instead.
+      w.onerror = (e: ErrorEvent) => rejectReady(new Error(`Terrain worker failed: ${e.message || 'unknown error'}`));
+      w.onmessageerror = () => rejectReady(new Error('Terrain worker failed: message could not be deserialised'));
+      w.onmessage = (e: MessageEvent<{ type: string; res?: PatchResult; error?: string }>) => {
         if (e.data.type === 'ready') {
           this.readyCount++;
           if (this.readyCount === count) resolveReady();
+          return;
+        }
+        if (e.data.type === 'error') {
+          rejectReady(new Error(`Terrain worker failed: ${e.data.error ?? 'unknown error'}`));
           return;
         }
         const res = e.data.res;

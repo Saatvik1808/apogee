@@ -262,6 +262,9 @@ export class PlanetTerrain {
   private disposeNode(n: TerrainNode): void {
     if (n.mesh) {
       this.group.remove(n.mesh);
+      // The index buffer is shared by every patch: detach it first, or disposing
+      // this geometry would delete the GPU copy all the other patches use
+      n.mesh.geometry.setIndex(null);
       n.mesh.geometry.dispose();
       n.mesh = null;
     }

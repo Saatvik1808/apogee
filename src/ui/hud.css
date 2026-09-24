@@ -679,6 +679,16 @@
   .hud .staging {
     width: 210px;
   }
+  .hud .topbar .seg.utc {
+    display: none;
+  }
+  .hud .mapbtn {
+    top: 76px;
+    right: 256px;
+  }
+}
+.hud .topbar .val {
+  white-space: nowrap;
 }
 
 /* --- maneuver planner --------------------------------------------- */
@@ -702,4 +712,242 @@
 }
 .hud .plan-msg.bad {
   color: #ffb3b3;
+}
+
+/* ======================================================================
+ * Touch / phone layout
+ *
+ * Landscape phones are ~740–930 × 360–430 CSS px: the desktop HUD's four
+ * permanent panels would cover the whole view. On touch devices only the
+ * essentials stay on screen (mission line, time/warp, navball + SAS, the
+ * event log); telemetry and the flight computer become pull-out panels
+ * opened from the icon bar. Corners belong to the thumbs (see touch.css).
+ * ==================================================================== */
+.hud.touch .telem,
+.hud.touch .rightcol,
+.hud.touch .staging,
+.hud.touch .mapbtn,
+.hud.touch .gauge.thr,
+.hud.touch .hdg {
+  display: none;
+}
+.hud.touch .topbar {
+  top: 6px;
+  left: calc(max(10px, var(--safe-left, 0px)) + 218px);
+  transform: none;
+}
+.hud.touch .topbar .seg {
+  padding: 3px 8px;
+}
+.hud.touch .topbar .lbl,
+.hud.touch .topbar .pips {
+  display: none;
+}
+.hud.touch .topbar .val {
+  font-size: 13px;
+}
+.hud.touch .topbar .seg.utc {
+  display: none;
+}
+/* Phones: the comms chip only appears when the link is down */
+.hud.touch .topbar .seg.sig:not(.alert) {
+  display: none;
+}
+.hud.touch .warp {
+  gap: 4px;
+}
+.hud.touch .warp .wbtn {
+  width: 32px;
+  height: 32px;
+}
+.hud.touch .warp .wlevel {
+  min-width: 46px;
+  text-align: center;
+}
+.hud.touch .mission {
+  top: 6px;
+  left: max(10px, var(--safe-left, 0px));
+  width: 210px;
+  cursor: pointer;
+}
+.hud.touch .mission .card-h {
+  display: none;
+}
+.hud.touch .mission .title {
+  font-size: 14px;
+  padding-top: 6px;
+}
+.hud.touch .mission .sub {
+  display: none;
+}
+.hud.touch .mission .obj:not(.active) {
+  display: none;
+}
+.hud.touch .mission.expanded .obj,
+.hud.touch .mission.expanded .sub {
+  display: flex;
+}
+.hud.touch .events {
+  left: calc(max(10px, var(--safe-left, 0px)) + 76px);
+  top: 96px;
+  transform: none;
+  width: 250px;
+  font-size: 11px;
+}
+.hud.touch .events .ev:nth-last-child(n + 5) {
+  display: none;
+}
+.hud.touch .navcluster {
+  bottom: 6px;
+  /* Anchor to the joystick (right: --sr + 96px, 128px wide) instead of the
+     screen centre: on a 740-px phone a centred cluster sat under the stick */
+  left: auto;
+  right: calc(var(--sr, 10px) + 240px);
+  transform: none;
+  gap: 8px;
+}
+.hud.touch .gauges {
+  display: none;
+}
+.hud.touch .sasgrid {
+  order: -1;
+}
+.hud.touch .speedbox {
+  padding: 3px 10px;
+  margin-bottom: 5px;
+}
+.hud.touch .speedbox .spd {
+  font-size: 16px;
+  min-width: 96px;
+}
+.hud.touch .ballframe {
+  box-shadow: 0 0 0 4px rgba(12, 16, 24, 0.9), 0 0 0 5px rgba(160, 190, 230, 0.25), 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+.hud.touch .sasgrid {
+  grid-template-columns: repeat(4, 30px);
+  gap: 4px;
+  padding: 6px;
+}
+.hud.touch .sasbtn {
+  width: 30px;
+  height: 30px;
+}
+.hud.touch .sasbtn.master {
+  grid-column: span 4;
+  height: 26px;
+}
+.hud.touch.show-telem .telem,
+.hud.touch.show-computer .rightcol {
+  display: flex;
+  flex-direction: column;
+  top: 50px;
+  bottom: auto;
+  right: max(10px, var(--safe-right, 0px));
+  width: 250px;
+  max-height: calc(100% - 64px);
+  overflow-y: auto;
+  z-index: 9;
+  animation: panel-in 0.2s ease-out both;
+}
+.hud.touch.show-computer .rightcol .card {
+  flex: none;
+}
+/* Flight computer first: it is what the panel is opened for */
+.hud.touch .rightcol .card:last-child {
+  order: -1;
+}
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+.hud.touch .toast {
+  top: 52px;
+  font-size: 20px;
+}
+.hud.touch .toast .small {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+}
+.hud.touch.map-mode .navcluster,
+.hud.touch.map-mode .events {
+  display: none;
+}
+.hud.touch .ap input {
+  font-size: 16px; /* ≥16 px stops mobile browsers zooming on focus */
+}
+.hud.touch .btn.small {
+  padding: 7px 10px;
+}
+
+/* G-load / heat warning chip in the speed box (phones hide the gauges) */
+.hud .speedbox .warnchip {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.hud .speedbox .warnchip.warn {
+  display: inline-block;
+  color: #1a1000;
+  background: var(--yellow);
+}
+.hud .speedbox .warnchip.bad {
+  display: inline-block;
+  color: #fff;
+  background: var(--red);
+}
+
+/* --- master alarm banner --------------------------------------------- */
+.hud .warnbanner {
+  position: absolute;
+  top: 150px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--red);
+  background: rgba(255, 60, 60, 0.18);
+  color: #ffb4b4;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  display: none;
+  pointer-events: none;
+  animation: warn-blink 0.75s steps(2) infinite;
+}
+.hud .warnbanner.show {
+  display: block;
+}
+@keyframes warn-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+.hud.touch .warnbanner {
+  top: 70px;
+  font-size: 12px;
+  padding: 4px 12px;
+}
+
+/* --- full-screen flashes ---------------------------------------------- */
+.flashout,
+.heatout {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 6;
+}
+.flashout {
+  background: #fff3e0;
+}
+.heatout {
+  background: radial-gradient(ellipse at center, rgba(255, 120, 40, 0) 30%, rgba(255, 110, 30, 0.55) 75%, rgba(255, 60, 10, 0.85) 100%);
 }

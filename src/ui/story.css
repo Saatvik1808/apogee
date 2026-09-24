@@ -1,0 +1,249 @@
+/*
+ * LEARNING NOTE: Story presentation styles
+ *
+ * Briefings use a letterboxed "comms panel": portrait left, speaker and text
+ * right, progress dots below. The radio feed is a compact subtitle bar placed
+ * above the flight instruments, where the eye already rests.
+ */
+.dlg-wrap {
+  position: absolute;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 24px 24px max(24px, 6vh);
+  background: linear-gradient(180deg, rgba(3, 5, 10, 0) 30%, rgba(3, 5, 10, 0.72));
+  animation: dlg-in 0.25s ease-out both;
+  pointer-events: auto;
+}
+.dlg-wrap.out {
+  animation: dlg-out 0.2s ease-in both;
+}
+@keyframes dlg-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes dlg-out {
+  to {
+    opacity: 0;
+  }
+}
+.dlg {
+  width: min(760px, 100%);
+  padding: 16px 20px 14px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(8, 12, 20, 0.94);
+}
+.dlg-head {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.dlg-kicker {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+.dlg-title {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 26px;
+  letter-spacing: 0.04em;
+}
+.dlg-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.dlg-portrait {
+  flex: none;
+  width: 64px;
+  height: 64px;
+}
+.dlg-main {
+  flex: 1;
+  min-width: 0;
+}
+.dlg-who {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dlg-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+}
+.dlg-role {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.dlg-text {
+  margin-top: 6px;
+  min-height: 4.6em;
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: #d9e2ee;
+}
+.dlg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+.dlg-dots {
+  display: flex;
+  gap: 6px;
+}
+.dlg-dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+}
+.dlg-dots i.done {
+  background: rgba(255, 255, 255, 0.4);
+}
+.dlg-dots i.on {
+  background: var(--accent);
+}
+.dlg-btns {
+  display: flex;
+  gap: 8px;
+}
+
+/* ------------------------------------------------------------ radio feed */
+.radio-feed {
+  position: absolute;
+  left: 50%;
+  bottom: calc(max(150px, 20vh) + 150px);
+  transform: translate(-50%, 8px);
+  width: min(560px, calc(100vw - 32px));
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(6, 10, 18, 0.78);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s;
+  z-index: 7;
+}
+.radio-feed.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.rf-portrait {
+  flex: none;
+  width: 38px;
+  height: 38px;
+}
+.rf-main {
+  min-width: 0;
+}
+.rf-name {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.rf-text {
+  margin-top: 2px;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: #e3eaf4;
+}
+.is-touch .radio-feed {
+  /* Just above the navball cluster (navball = clamp(90px, 27vh, 150px)) */
+  bottom: calc(clamp(90px, 27vh, 150px) + 54px);
+  width: min(420px, calc(100vw - 330px));
+  padding: 6px 10px;
+}
+.is-touch .rf-text {
+  font-size: 12px;
+}
+
+/* ----------------------------------------------------------- signal chip */
+.sig-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--green);
+}
+.sig-chip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.sig-chip.los {
+  color: var(--red);
+}
+.sig-chip.blackout {
+  color: var(--accent-2);
+  animation: sig-blink 0.8s steps(2) infinite;
+}
+@keyframes sig-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* --------------------------------------------------------- phones */
+@media (max-height: 540px) {
+  .dlg-wrap {
+    padding: 10px 12px 10px max(12px, var(--safe-left, 0px));
+    align-items: flex-end;
+  }
+  .dlg {
+    padding: 10px 14px;
+  }
+  .dlg-title {
+    font-size: 20px;
+  }
+  .dlg-portrait {
+    width: 48px;
+    height: 48px;
+  }
+  .dlg-portrait svg {
+    width: 48px;
+    height: 48px;
+  }
+  .dlg-text {
+    font-size: 13.5px;
+    min-height: 3.2em;
+  }
+}
+
+/* Crew g-load grey-out: tunnel vision closing in from the edges */
+.greyout {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0;
+  background: radial-gradient(ellipse at center, rgba(40, 40, 44, 0) 18%, rgba(60, 60, 64, 0.55) 55%, rgba(8, 8, 10, 0.97) 100%);
+  mix-blend-mode: normal;
+}

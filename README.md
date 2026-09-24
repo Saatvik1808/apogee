@@ -9,9 +9,13 @@ Everything runs client-side in the browser (Three.js + TypeScript, no server).
 - **Real orbital mechanics** — true-scale Earth, Moon and Mars, patched-conic trajectories,
   atmospheric drag, fuel flow and staging, maneuver nodes with a burn planner (circularize,
   trans-lunar injection, mid-course correction, return to Earth, de-orbit).
-- **Campaign** — ten missions from a first sounding rocket to a crewed Moon landing and
-  return, plus quick launches from four real launch sites at any time of day or in the
-  computed lunar launch window.
+- **Campaign** — four story chapters and fourteen missions, from a first sounding rocket to
+  a crewed Moon landing and a Mars lander, with a mission-control cast, briefings, live radio
+  chatter (loss of signal behind the Moon, re-entry blackout) and three-star ratings; plus
+  quick launches from four real launch sites at any time of day or in the computed lunar and
+  Mars launch windows (Lambert-solver porkchop search).
+- **Graphics options** — Battery saver / Balanced / High / Ultra presets tuned separately for
+  phones and desktops, dynamic resolution, frame-rate cap and per-effect controls.
 - **Rendering** — physically based atmospheric scattering and clouds, quadtree terrain streamed
   from real elevation data in web workers, night-side city lights, ocean, engine plumes with
   shock diamonds, smoke, bloom, eye adaptation and a reversed-Z depth buffer that covers
@@ -51,9 +55,42 @@ Asset paths are relative (`base: './'`), so it works from a domain root or any s
 No environment variables or server are needed. Progress and saved rockets are stored in the
 player's browser (`localStorage`).
 
+## Android app
+
+The same code ships as a native Android app via [Capacitor](https://capacitorjs.com): a
+full-screen, landscape, offline APK/AAB that runs the game in the system WebView (WebGL 2),
+with touch controls, haptics, the Back button and phone-tuned graphics presets.
+
+Requirements: **Node 22** (Capacitor CLI), **JDK 21**, Android SDK platform 36 + build-tools 36.
+
+```bash
+npm run android:sync      # web build for phones (drops the 8k maps and full-size detail textures) + copy into android/
+npm run android:apk       # signed release APK  → android/app/build/outputs/apk/release/
+npm run android:aab       # Play Store bundle   → android/app/build/outputs/bundle/release/
+```
+
+Release signing reads `android/keystore.properties` (git-ignored):
+
+```properties
+storeFile=keystore/apogee-upload.jks
+storePassword=…
+keyAlias=apogee
+keyPassword=…
+```
+
+Keep the keystore and its passwords backed up: Play Store updates must be signed with the
+same upload key. Without `keystore.properties` the release build is produced unsigned.
+Store listing art (512 px icon, 1024×500 feature graphic) is in `android/store/`; the icon and
+splash generator is `tools/android/make_icons.py`.
+
 ## Controls
 
-**Flight**
+**Touch (phones and tablets)** — left slider: throttle (MAX/CUT at the ends) · right stick:
+pitch/yaw, ROLL buttons above it · STAGE button · drag to rotate the camera, pinch to zoom ·
+icon bar: map, camera, telemetry, flight computer, photo mode, pause · in the map, tap an
+orbit to add a maneuver node · Back button opens the pause menu.
+
+**Flight (keyboard)**
 
 | Key             | Action                         | Key     | Action                          |
 | --------------- | ------------------------------ | ------- | ------------------------------- |

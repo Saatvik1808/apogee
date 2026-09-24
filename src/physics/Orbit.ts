@@ -186,10 +186,13 @@ export class Orbit {
       this.apoapsis = this.e < 1 ? this.p / (1 - this.e) : Infinity;
     }
 
-    if (this.alpha > 0 && this.e < 1) {
+    // Bound motion (positive alpha = 1/a) has a period — including the degenerate
+    // straight-up-and-down case, whose eccentricity evaluates to exactly 1 but
+    // which still repeats every 2π√(a³/μ) (a "rectilinear ellipse")
+    if (this.alpha > 0 && (this.e < 1 || this.degenerate)) {
       this.period = TAU * Math.sqrt(1 / (this.alpha * this.alpha * this.alpha) / mu);
       this.meanMotion = TAU / this.period;
-    } else if (isFinite(this.a)) {
+    } else if (isFinite(this.a) && this.alpha < 0) {
       this.period = Infinity;
       this.meanMotion = Math.sqrt(mu / Math.pow(-this.a, 3));
     } else {

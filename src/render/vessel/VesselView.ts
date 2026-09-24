@@ -18,6 +18,7 @@ import type { FlightPart } from '../../sim/FlightPart';
 import type { Vessel } from '../../sim/Vessel';
 import { buildInterstage, buildPartVisual, disposeObject, poseLeg, type PartVisual } from './PartMeshes';
 import { Plume } from './Plume';
+import { temperatureToRgb } from '../sky/Sky';
 
 interface PartEntry {
   part: FlightPart;
@@ -53,6 +54,7 @@ export class VesselView {
       this.group.remove(e.obj);
       disposeObject(e.obj);
       for (const p of e.plumes) p.dispose();
+      for (const m of e.vis.heat) m.dispose();
     }
     this.entries.clear();
     const v = this.vessel;
@@ -128,6 +130,16 @@ export class VesselView {
         for (const g of e.vis.glow) g.emissiveIntensity = thr * 3.5;
         for (const h of e.vis.hotMaterials) h.emissiveIntensity = thr * 0.9;
       }
+      if (e.vis.heat.length) {
+        // Incandescence: invisible below ~800 K, dull red → orange → yellow-white
+        const T = p.temperature;
+        const k = Math.max(0, Math.min(1, (T - 800) / Math.max(1, p.def.maxTemp * 0.85 - 800)));
+        const [r, g, b] = temperatureToRgb(Math.max(1000, T));
+        for (const m of e.vis.heat) {
+          m.emissive.setRGB(r, g * 0.85, b * 0.6);
+          m.emissiveIntensity = k * k * 6;
+        }
+      }
       const canopy = e.vis.canopy;
       if (canopy) {
         const st = p.chuteState;
@@ -137,9 +149,9 @@ export class VesselView {
           const s = st === 'semi' ? 0.08 + 0.1 * p.chuteDeploy : 0.15 + 0.85 * p.chuteDeploy;
           canopy.scale.set(s, 0.35 + 0.65 * Math.min(1, p.chuteDeploy * 1.5), s);
           // Trail behind the airflow: canopy +Y along −(air velocity), in part space
-          const spd = v.surfaceVelocity.length();
+          const spd = v.airVelocity.length();
           if (spd > 0.5) {
-            _v.copy(v.surfaceVelocity).multiplyScalar(-1 / spd).applyQuaternion(_qInv);
+            _v.copy(v.airVelocity).multiplyScalar(-1 / spd).applyQuaternion(_qInv);
             _q.copy(p.rotation).invert();
             _v.applyQuaternion(_q);
             canopy.quaternion.setFromUnitVectors(Y, _v);

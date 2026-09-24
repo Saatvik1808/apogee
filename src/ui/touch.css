@@ -1,0 +1,286 @@
+/*
+ * LEARNING NOTE: Thumb-sized UI
+ *
+ * Touch targets need to be at least ~44 CSS px (roughly the pad of a thumb);
+ * anything smaller produces mis-taps. Controls sit where thumbs rest in
+ * landscape — bottom-left and bottom-right corners — and everything else stays
+ * out of those zones. `touch-action: none` stops the browser from treating a
+ * drag on a control as a page scroll or zoom, and `user-select: none` prevents
+ * long-presses from selecting text.
+ *
+ * On phones the whole layer also respects the display cut-out (camera hole) via
+ * the --safe-* variables set by the native shell.
+ *
+ * Key concepts: touch target size, reach zones, touch-action, safe areas
+ */
+.touch-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 8;
+  --sl: max(10px, var(--safe-left, 0px));
+  --sr: max(10px, var(--safe-right, 0px));
+}
+.touch-ui > * {
+  pointer-events: auto;
+  touch-action: none;
+}
+.tc-btn {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: rgba(10, 14, 22, 0.62);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text);
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.tc-btn:active,
+.tc-btn.held {
+  background: rgba(90, 216, 255, 0.22);
+  border-color: var(--cyan);
+}
+
+/* ------------------------------------------------------------------ throttle */
+.tc-throttle {
+  position: absolute;
+  left: var(--sl);
+  bottom: 14px;
+  width: 62px;
+  height: min(70vh, 280px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.tc-thr-btn {
+  height: 34px;
+  font-size: 12px;
+  flex: none;
+}
+.tc-thr-btn.max {
+  color: var(--accent-2);
+}
+.tc-thr-btn.cut {
+  color: var(--red);
+}
+.tc-thr-track {
+  position: relative;
+  flex: 1;
+  border-radius: 14px;
+  background: rgba(10, 14, 22, 0.62);
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
+  touch-action: none;
+}
+.tc-thr-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0;
+  background: linear-gradient(0deg, rgba(255, 138, 61, 0.85), rgba(255, 190, 110, 0.55));
+}
+.tc-thr-ticks {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 calc(10% - 1px), rgba(255, 255, 255, 0.14) calc(10% - 1px) 10%);
+  pointer-events: none;
+}
+.tc-thr-thumb {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 6px;
+  margin-bottom: -3px;
+  bottom: 0;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 0 10px rgba(255, 180, 90, 0.9);
+  pointer-events: none;
+}
+.tc-thr-val {
+  position: absolute;
+  left: calc(100% + 6px);
+  bottom: 50%;
+  font-size: 13px;
+  color: var(--accent-2);
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ joystick */
+.tc-stick {
+  position: absolute;
+  right: calc(var(--sr) + 96px);
+  bottom: 18px;
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: radial-gradient(circle, rgba(90, 216, 255, 0.08), rgba(10, 14, 22, 0.55) 70%);
+  touch-action: none;
+}
+.tc-stick.active {
+  border-color: var(--cyan);
+}
+.tc-stick-cross {
+  position: absolute;
+  inset: 18%;
+  border-radius: 50%;
+  border: 1px dashed rgba(160, 190, 230, 0.2);
+  pointer-events: none;
+}
+.tc-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 54px;
+  height: 54px;
+  margin: -27px 0 0 -27px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #e8f7ff, #7fbfe0 60%, #3c6f8f);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  transition: transform 0.12s ease-out;
+}
+.tc-stick.active .tc-knob {
+  transition: none;
+}
+.tc-roll {
+  position: absolute;
+  right: calc(var(--sr) + 96px);
+  bottom: 154px;
+  width: 128px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tc-roll-btn {
+  width: 44px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+}
+.tc-roll-l {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------- stage */
+.tc-stage {
+  position: absolute;
+  right: var(--sr);
+  bottom: 18px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 138, 61, 0.9);
+  background: radial-gradient(circle at 50% 35%, rgba(255, 150, 70, 0.55), rgba(120, 40, 10, 0.75));
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  box-shadow: 0 0 22px rgba(255, 120, 40, 0.35);
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+.tc-stage-l {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.14em;
+}
+.tc-stage-sub {
+  max-width: 70px;
+  font-size: 9px;
+  line-height: 1.1;
+  text-align: center;
+  color: rgba(255, 235, 215, 0.85);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tc-stage.fired {
+  transform: scale(0.93);
+  filter: brightness(1.5);
+}
+.tc-stage.empty {
+  opacity: 0.35;
+  border-color: var(--line-strong);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------- top bar */
+.tc-bar {
+  position: absolute;
+  top: 6px;
+  right: var(--sr);
+  display: flex;
+  gap: 5px;
+}
+.tc-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.tc-icon.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(90, 216, 255, 0.14);
+}
+.tc-photo-exit {
+  position: absolute;
+  top: 8px;
+  right: var(--sr);
+  display: none;
+  opacity: 0.55;
+}
+
+/* Photo mode: only the exit button remains */
+.touch-ui.photo > * {
+  display: none;
+}
+.touch-ui.photo > .tc-photo-exit {
+  display: grid;
+}
+/* The map needs no steering; keep throttle and staging */
+.touch-ui.map-mode .tc-stick,
+.touch-ui.map-mode .tc-roll {
+  display: none;
+}
+
+@media (max-height: 380px) {
+  .tc-stick {
+    width: 112px;
+    height: 112px;
+    right: calc(var(--sr) + 88px);
+  }
+  .tc-roll {
+    width: 112px;
+    right: calc(var(--sr) + 88px);
+    bottom: 138px;
+  }
+  .tc-stage {
+    width: 72px;
+    height: 72px;
+  }
+  .tc-throttle {
+    width: 56px;
+  }
+}

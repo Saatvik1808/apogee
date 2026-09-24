@@ -63,6 +63,8 @@ export interface PredictOptions {
 }
 
 export class TrajectoryPredictor {
+  /** Incremented by every prediction, so consumers (the map's orbit lines) can tell when to rebuild. */
+  version = 0;
   /** Reusable patch storage to avoid per-frame allocations. */
   readonly patches: TrajectoryPatch[] = [];
   count = 0;
@@ -82,6 +84,7 @@ export class TrajectoryPredictor {
     let t = t0;
     const maxP = Math.min(opts.maxPatches, this.patches.length);
     this.count = 0;
+    this.version++;
     for (let i = 0; i < maxP; i++) {
       const patch = this.patches[i]!;
       patch.body = curBody;

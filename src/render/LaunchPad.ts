@@ -53,9 +53,12 @@ export class LaunchPad {
   /** Crew arm pivot (swings away at liftoff). */
   private readonly arm: Object3D;
   private armAngle = 0;
+  /** Shared source textures (never disposed here; the per-pad clones are). */
+  private readonly sourceConcrete: PadTextures['concrete'];
 
   constructor(tex: PadTextures, vesselHeight: number, vesselRadius: number) {
     this.group.name = 'launch-pad';
+    this.sourceConcrete = tex.concrete;
     const concreteTex = (t: Texture, rep: number) => {
       const c = t.clone();
       c.wrapS = c.wrapT = RepeatWrapping;
@@ -244,6 +247,34 @@ export class LaunchPad {
       this.group.add(s.target);
       this.lights.push(s);
     }
+  }
+
+  /**
+   * Free every geometry, material and texture this pad created. A pad is built
+   * per flight, and three.js keeps undisposed geometry alive in its binding
+   * cache — so without this each launch leaked the whole complex.
+   */
+  dispose(): void {
+    const mats = new Set<import('three').Material>();
+    this.group.traverse((o) => {
+      const m = o as Mesh;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) {
+        if (Array.isArray(m.material)) for (const x of m.material) mats.add(x);
+        else mats.add(m.material);
+      }
+      if ((o as InstancedMesh).isInstancedMesh) (o as InstancedMesh).dispose();
+    });
+    for (const m of mats) {
+      const s = m as MeshStandardMaterial;
+      // The concrete maps are per-pad clones (own repeat settings): free their GPU copies
+      if (s.map && s.map !== this.sourceConcrete.diff) s.map.dispose();
+      if (s.normalMap && s.normalMap !== this.sourceConcrete.nor) s.normalMap.dispose();
+      if (s.roughnessMap && s.roughnessMap !== this.sourceConcrete.rough) s.roughnessMap.dispose();
+      m.dispose();
+    }
+    for (const l of this.lights) l.dispose();
+    this.group.removeFromParent();
   }
 
   /** Floodlights on at night; crew arm retracts after liftoff. */

@@ -54,6 +54,8 @@ export interface PartVisual {
   nozzles: NozzleInfo[];
   /** Emissive materials that glow with throttle (nozzle interiors). */
   glow: MeshStandardMaterial[];
+  /** Per-part clones that glow with skin temperature (heat shields). */
+  heat: MeshStandardMaterial[];
   /** Niobium extensions that heat up red. */
   hotMaterials: MeshStandardMaterial[];
   canopy: Group | null;
@@ -452,10 +454,15 @@ function buildFin(def: PartDef, g: Group): void {
   g.add(m);
 }
 
-function buildHeatshield(stats: PartStats, g: Group): void {
+function buildHeatshield(stats: PartStats, g: Group, vis: PartVisual): void {
   const r = stats.diameterTop / 2;
   const h = stats.height;
-  g.add(lathe([[0, -h / 2 - r * 0.05], [r * 0.8, -h / 2 - r * 0.02], [r, -h / 2 + h * 0.3], [r, h / 2], [0, h / 2]], segs(r), MAT.ablator()));
+  // Own material so the ablator can glow with ITS temperature during re-entry
+  const m = MAT.ablator().clone();
+  m.emissive.setRGB(1, 0.35, 0.1);
+  m.emissiveIntensity = 0;
+  vis.heat.push(m);
+  g.add(lathe([[0, -h / 2 - r * 0.05], [r * 0.8, -h / 2 - r * 0.02], [r, -h / 2 + h * 0.3], [r, h / 2], [0, h / 2]], segs(r), m));
 }
 
 function buildParachutePack(def: PartDef, stats: PartStats, cfg: PartConfig, g: Group, vis: PartVisual): void {
@@ -524,16 +531,21 @@ function buildLeg(def: PartDef, stats: PartStats, g: Group, vis: PartVisual): vo
 }
 
 /** Update a leg's strut & foot for a deploy fraction; matches Vessel.buildContacts. */
+const _legFoot = new Vector3();
+const _legHinge = new Vector3();
+const _legDir = new Vector3();
+const _legUp = new Vector3(0, 1, 0);
+
 export function poseLeg(leg: { strut: Object3D; foot: Object3D; length: number; height: number }, d: number): void {
   const L = leg.length;
   const h = leg.height;
-  const foot = new Vector3(0.25 + 0.45 * L * d, -h * 0.35 - 0.55 * L * d - 0.25 * L * (1 - d) * 0.3, 0);
-  const hinge = new Vector3(0.15, -h * 0.1, 0);
-  const dir = foot.clone().sub(hinge);
+  const foot = _legFoot.set(0.25 + 0.45 * L * d, -h * 0.35 - 0.55 * L * d - 0.25 * L * (1 - d) * 0.3, 0);
+  const hinge = _legHinge.set(0.15, -h * 0.1, 0);
+  const dir = _legDir.copy(foot).sub(hinge);
   const len = dir.length();
   leg.strut.position.copy(hinge).addScaledVector(dir, 0.5);
   leg.strut.scale.set(1, len, 1);
-  leg.strut.quaternion.setFromUnitVectors(new Vector3(0, 1, 0), dir.normalize());
+  leg.strut.quaternion.setFromUnitVectors(_legUp, dir.normalize());
   leg.foot.position.copy(foot);
 }
 
@@ -559,7 +571,7 @@ function buildSolar(g: Group, vis: PartVisual): void {
 export function buildPartVisual(def: PartDef, stats: PartStats, cfg: PartConfig, ctx: BuildContext): PartVisual {
   const g = new Group();
   g.name = def.id;
-  const vis: PartVisual = { root: g, nozzles: [], glow: [], hotMaterials: [], canopy: null, legs: [], solar: [], fairingShell: null };
+  const vis: PartVisual = { root: g, nozzles: [], glow: [], heat: [], hotMaterials: [], canopy: null, legs: [], solar: [], fairingShell: null };
   switch (def.shape) {
     case 'tank':
       buildTank(stats, cfg, g);
@@ -601,7 +613,7 @@ export function buildPartVisual(def: PartDef, stats: PartStats, cfg: PartConfig,
       buildFin(def, g);
       break;
     case 'heatshield':
-      buildHeatshield(stats, g);
+      buildHeatshield(stats, g, vis);
       break;
     case 'parachute':
     case 'radial-chute':
@@ -626,6 +638,7 @@ export function highlightMaterial(color: number): MeshBasicMaterial {
 export function disposeObject(o: Object3D): void {
   o.traverse((c) => {
     const m = c as Mesh;
-    if (m.geometry) (m.geometry as BufferGeometry).dispose();
+    // Geometries flagged `shared` (the plume cylinder) belong to every vessel
+    if (m.geometry && !(m.geometry as BufferGeometry).userData.shared) (m.geometry as BufferGeometry).dispose();
   });
 }

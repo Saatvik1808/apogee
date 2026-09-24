@@ -51,7 +51,7 @@ export interface HudActions {
   deleteNodes(): void;
 }
 
-export type PlanKind = 'circ-ap' | 'circ-pe' | 'tli' | 'mcc' | 'tei' | 'deorbit';
+export type PlanKind = 'circ-ap' | 'circ-pe' | 'capture' | 'tli' | 'tmi' | 'mcc' | 'tei' | 'deorbit';
 
 export interface ObjectiveView {
   text: string;
@@ -76,6 +76,12 @@ const _up = new Vector3();
 const _east = new Vector3();
 const _north = new Vector3();
 const _tmp = new Vector3();
+const _right = new Vector3();
+const _dorsal = new Vector3();
+const _nose = new Vector3();
+const _vel = new Vector3();
+const _tgt = new Vector3();
+const _dir = new Vector3();
 const _proj = { x: 0, y: 0, front: false };
 
 interface Row {
@@ -93,6 +99,8 @@ export class FlightHUD {
   private readonly warpVal: HTMLDivElement;
   private readonly pips: HTMLDivElement;
   private readonly pauseBtn: HTMLButtonElement;
+  private readonly sigChip: HTMLSpanElement;
+  private sigKey = '';
   // mission
   private readonly mTitle: HTMLDivElement;
   private readonly mSub: HTMLDivElement;
@@ -104,8 +112,13 @@ export class FlightHUD {
   // navball
   readonly ballFrame: HTMLDivElement;
   private readonly markers = new Map<string, HTMLDivElement>();
+  private readonly markerShown = new Map<string, boolean>();
+  private readonly shownMarkers = new Set<string>();
+  private ballSize = -1;
+  private pauseShown: boolean | null = null;
   private readonly speedMode: HTMLSpanElement;
   private readonly speedVal: HTMLSpanElement;
+  private readonly warnChip: HTMLSpanElement;
   private readonly hdg: HTMLDivElement;
   private readonly sasBtns = new Map<SASMode, HTMLDivElement>();
   private readonly sasMaster: HTMLDivElement;
@@ -128,15 +141,19 @@ export class FlightHUD {
   private readonly apAlt: HTMLInputElement;
   private readonly apHdg: HTMLInputElement;
   private readonly toast: HTMLDivElement;
+  private readonly warnBanner: HTMLDivElement;
+  private warnText = '';
   private toastTimer = 0;
   private readonly help: HTMLDivElement;
   private textTimer = 0;
   readonly mapBtn: HTMLButtonElement;
 
-  constructor(parent: HTMLElement, actions: HudActions, navball: Navball) {
+  private readonly panelState = { telemetry: false, computer: false };
+
+  constructor(parent: HTMLElement, actions: HudActions, navball: Navball, touch = false) {
     this.actions = actions;
     this.navball = navball;
-    this.root = h('div', { class: 'hud' });
+    this.root = h('div', { class: `hud${touch ? ' touch' : ''}` });
 
     // --- top bar ---
     this.met = h('div', { class: 'val', text: 'T− 00:00' });
@@ -145,11 +162,13 @@ export class FlightHUD {
     this.pips = h('div', { class: 'pips' });
     for (let i = 0; i < WARP_LEVELS.length; i++) this.pips.appendChild(h('i'));
     this.pauseBtn = h('button', { class: 'wbtn', html: ICONS.pause, title: 'Pause (P)', onClick: () => actions.togglePause() });
+    this.sigChip = h('span', { class: 'sig-chip', text: 'LINK' });
     const top = h(
       'div',
       { class: 'topbar card pe' },
       h('div', { class: 'seg met' }, h('div', { class: 'lbl', text: 'Mission time' }), this.met),
-      h('div', { class: 'seg' }, h('div', { class: 'lbl', text: 'UTC' }), this.ut),
+      h('div', { class: 'seg sig' }, h('div', { class: 'lbl', text: 'Comms' }), this.sigChip),
+      h('div', { class: 'seg utc' }, h('div', { class: 'lbl', text: 'UTC' }), this.ut),
       h(
         'div',
         { class: 'seg warp' },
@@ -165,7 +184,10 @@ export class FlightHUD {
     this.mTitle = h('div', { class: 'title', text: '' });
     this.mSub = h('div', { class: 'sub', text: '' });
     this.objList = h('div', { style: 'padding-bottom:8px' });
-    this.root.appendChild(h('div', { class: 'mission card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Mission' }), h('span', { class: 'accent', text: '●' })), this.mTitle, this.mSub, this.objList));
+    const missionCard = h('div', { class: 'mission card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Mission' }), h('span', { class: 'accent', text: '●' })), this.mTitle, this.mSub, this.objList);
+    // On phones the card shows only the current objective; tap to see them all
+    missionCard.addEventListener('click', () => missionCard.classList.toggle('expanded'));
+    this.root.appendChild(missionCard);
     this.events = h('div', { class: 'events' });
     this.root.appendChild(this.events);
 
@@ -189,6 +211,7 @@ export class FlightHUD {
       ['mach', 'Mach'],
       ['q', 'Dyn. pressure'],
       ['aoa', 'Angle of attack'],
+      ['wind', 'Wind'],
     ]);
     grp('Orbit', [
       ['soi', 'Body'],
@@ -211,7 +234,8 @@ export class FlightHUD {
     // --- navball cluster ---
     this.speedMode = h('span', { class: 'mode', text: 'SURFACE' });
     this.speedVal = h('span', { class: 'spd', text: '0.0 m/s' });
-    const speedbox = h('div', { class: 'speedbox card pe', title: 'Click to cycle surface / orbit / target speed', onClick: () => actions.cycleSpeedMode() }, this.speedMode, this.speedVal);
+    this.warnChip = h('span', { class: 'warnchip', text: '' });
+    const speedbox = h('div', { class: 'speedbox card pe', title: 'Click to cycle surface / orbit / target speed', onClick: () => actions.cycleSpeedMode() }, this.speedMode, this.speedVal, this.warnChip);
     this.ballFrame = h('div', { class: 'ballframe' });
     this.ballFrame.appendChild(h('div', { class: 'reticle', html: RETICLE_SVG }));
     for (const m of ['prograde', 'retrograde', 'normal', 'antinormal', 'radial-out', 'radial-in', 'target', 'anti-target', 'maneuver'] as SASMode[]) {
@@ -265,7 +289,7 @@ export class FlightHUD {
 
     // --- staging ---
     this.stagesEl = h('div', { class: 'stages' });
-    const stageBtn = h('button', { class: 'btn primary stagebtn pe', text: 'Stage ▸  Space', onClick: () => actions.stage() });
+    const stageBtn = h('button', { class: 'btn primary stagebtn pe', text: touch ? 'Stage ▸' : 'Stage ▸  Space', onClick: () => actions.stage() });
     this.root.appendChild(h('div', { class: 'staging card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Staging' }), h('span', { class: 'accent', text: '▲' })), this.stagesEl, stageBtn));
 
     // --- resources + autopilot ---
@@ -306,9 +330,21 @@ export class FlightHUD {
 
     this.toast = h('div', { class: 'toast' });
     this.root.appendChild(this.toast);
+    this.warnBanner = h('div', { class: 'warnbanner' });
+    this.root.appendChild(this.warnBanner);
 
     this.help = h('div', { class: 'help', onClick: () => this.help.classList.remove('show') });
-    const rows: Array<[string, string]> = [
+    const touchRows: Array<[string, string]> = [
+      ['Left slider', 'Throttle (MAX / CUT buttons at the ends)'],
+      ['Right stick', 'Pitch and yaw · ROLL buttons above it'],
+      ['STAGE', 'Launch / activate the next stage'],
+      ['Drag · pinch', 'Rotate · zoom the camera'],
+      ['Map ◎ then tap an orbit', 'Add a maneuver node there'],
+      ['Chart / chip icons', 'Telemetry · flight computer (autopilot, burns)'],
+      ['Eye', 'Photo mode (hide the HUD)'],
+      ['Back button', 'Pause menu'],
+    ];
+    const rows: Array<[string, string]> = touch ? touchRows : [
       ['W / S', 'Pitch down / up'],
       ['A / D', 'Yaw left / right'],
       ['Q / E', 'Roll left / right'],
@@ -326,10 +362,10 @@ export class FlightHUD {
       ['P', 'Pause'],
       ['Esc', 'Flight menu'],
       ['H', 'This help'],
-    ];
+      ];
     const tbl = h('table');
     for (const [k, d] of rows) tbl.appendChild(h('tr', {}, h('td', {}, h('kbd', { text: k })), h('td', { text: d })));
-    this.help.appendChild(h('div', { class: 'card' }, h('div', { class: 'card-h', text: 'Flight controls' }), h('div', { style: 'padding:10px' }, tbl)));
+    this.help.appendChild(h('div', { class: 'card' }, h('div', { class: 'card-h', text: touch ? 'Touch controls' : 'Flight controls' }), h('div', { style: 'padding:10px' }, tbl)));
     this.root.appendChild(this.help);
 
     parent.appendChild(this.root);
@@ -343,6 +379,32 @@ export class FlightHUD {
 
   toggleHelp(): void {
     this.help.classList.toggle('show');
+  }
+
+  /** Communications status: link (with light-time delay when far out), LOS or blackout. */
+  setSignal(state: 'link' | 'los' | 'blackout', lightTime: number): void {
+    const delay = lightTime > 60 ? `${Math.floor(lightTime / 60)}m ${Math.round(lightTime % 60)}s` : lightTime > 0.5 ? `${lightTime.toFixed(1)} s` : '';
+    const text = state === 'los' ? 'LOS' : state === 'blackout' ? 'BLACKOUT' : delay ? `LINK ${delay}` : 'LINK';
+    const key = state + text;
+    if (key === this.sigKey) return;
+    this.sigKey = key;
+    this.sigChip.textContent = text;
+    this.sigChip.className = `sig-chip ${state === 'link' ? '' : state}`;
+    this.sigChip.parentElement?.classList.toggle('alert', state !== 'link');
+  }
+
+  /** Phones: telemetry and the flight computer are pull-out panels. */
+  togglePanel(p: 'telemetry' | 'computer'): void {
+    const other = p === 'telemetry' ? 'computer' : 'telemetry';
+    this.panelState[p] = !this.panelState[p];
+    // One panel at a time on small screens
+    if (this.panelState[p]) this.panelState[other] = false;
+    this.root.classList.toggle('show-telem', this.panelState.telemetry);
+    this.root.classList.toggle('show-computer', this.panelState.computer);
+  }
+
+  get panels(): { telemetry: boolean; computer: boolean } {
+    return this.panelState;
   }
 
   private renderAp(): void {
@@ -373,8 +435,10 @@ export class FlightHUD {
       this.apBody.appendChild(
         h('div', { class: 'plan-grid' },
           b('Circ. @ Ap', 'circ-ap', 'Circularise at the next apoapsis'),
-          b('Circ. @ Pe', 'circ-pe', 'Circularise at the next periapsis (capture)'),
+          b('Circ. @ Pe', 'circ-pe', 'Circularise at the next periapsis'),
+          b('Capture', 'capture', 'Brake at periapsis into a loose elliptical orbit (cheapest capture)'),
           b('To the Moon', 'tli', 'Trans-lunar injection from a parking orbit'),
+          b('To Mars', 'tmi', 'Trans-Mars injection from a parking orbit (launch in the Mars window)'),
           b('Fine-tune', 'mcc', 'Mid-course correction for the arrival periapsis'),
           b('Return home', 'tei', 'Trans-Earth injection from lunar orbit'),
           b('De-orbit', 'deorbit', 'Lower the periapsis for re-entry / landing'),
@@ -397,6 +461,14 @@ export class FlightHUD {
         ),
       );
     }
+  }
+
+  /** Master-alarm banner (empty string hides it). */
+  setWarning(text: string): void {
+    if (text === this.warnText) return;
+    this.warnText = text;
+    this.warnBanner.textContent = text;
+    this.warnBanner.classList.toggle('show', !!text);
   }
 
   showToast(text: string, sub = '', seconds = 3): void {
@@ -445,48 +517,67 @@ export class FlightHUD {
 
   private updateNavball(sim: FlightSim, v: Vessel, size: number): void {
     const f = this.ballFrame;
-    f.style.width = f.style.height = `${size}px`;
+    if (size !== this.ballSize) {
+      this.ballSize = size;
+      f.style.width = f.style.height = `${size}px`;
+    }
     _up.copy(v.r).normalize();
     _tmp.set(0, 1, 0).applyQuaternion(v.body.rotation);
     _east.crossVectors(_tmp, _up);
     if (_east.lengthSq() < 1e-10) _east.set(1, 0, 0);
     _east.normalize();
     _north.crossVectors(_up, _east).normalize();
-    const right = new Vector3(1, 0, 0).applyQuaternion(v.q);
-    const dorsal = new Vector3(0, 0, 1).applyQuaternion(v.q);
-    const nose = new Vector3(0, 1, 0).applyQuaternion(v.q);
-    this.navball.setAttitude(right, dorsal, nose, _east, _north, _up);
+    _right.set(1, 0, 0).applyQuaternion(v.q);
+    _dorsal.set(0, 0, 1).applyQuaternion(v.q);
+    _nose.set(0, 1, 0).applyQuaternion(v.q);
+    this.navball.setAttitude(_right, _dorsal, _nose, _east, _north, _up);
     const mode = v.controls.speedMode;
-    const vel = mode === 'surface' ? v.surfaceVelocity : mode === 'target' && sim.target ? _tmp.copy(v.v).add(v.body.velocity).sub(sim.target.velocity) : v.v;
-    const dirs: Array<[SASMode, Vector3 | null]> = [];
+    const vel = mode === 'surface' ? v.surfaceVelocity : mode === 'target' && sim.target ? _vel.copy(v.v).add(v.body.velocity).sub(sim.target.velocity) : v.v;
+    // Markers: every frame, without allocating — each direction is projected in
+    // place and its element only touched when its state actually changes
+    const shown = this.shownMarkers;
+    shown.clear();
+    const R = size / 2;
     if (vel.lengthSq() > 0.25) {
-      dirs.push(['prograde', vel.clone()]);
-      dirs.push(['retrograde', vel.clone().negate()]);
+      this.placeMarker('prograde', vel, false, R, shown);
+      this.placeMarker('retrograde', vel, true, R, shown);
     }
     if (!v.pinned) {
       orbitalFrame(v.r, v.v, _p, _n, _r);
-      dirs.push(['normal', _n.clone()], ['antinormal', _n.clone().negate()], ['radial-out', _r.clone()], ['radial-in', _r.clone().negate()]);
+      this.placeMarker('normal', _n, false, R, shown);
+      this.placeMarker('antinormal', _n, true, R, shown);
+      this.placeMarker('radial-out', _r, false, R, shown);
+      this.placeMarker('radial-in', _r, true, R, shown);
     }
     if (sim.target) {
-      const t = sim.target.position.clone().sub(v.absolutePosition(new Vector3()));
-      dirs.push(['target', t], ['anti-target', t.clone().negate()]);
+      _tgt.copy(sim.target.position).sub(v.absolutePosition(_tmp));
+      this.placeMarker('target', _tgt, false, R, shown);
+      this.placeMarker('anti-target', _tgt, true, R, shown);
     }
     const node = sim.nodes[0];
-    if (node && node.remaining.lengthSq() > 1e-4) dirs.push(['maneuver', node.remaining.clone()]);
-    const shown = new Set<string>();
-    const R = size / 2;
-    for (const [m, d] of dirs) {
-      if (!d) continue;
-      this.navball.project(d, _proj);
-      const el = this.markers.get(m);
-      if (!el) continue;
-      if (!_proj.front) continue;
-      el.style.display = '';
-      el.style.left = `${R + _proj.x * R * 0.96}px`;
-      el.style.top = `${R - _proj.y * R * 0.96}px`;
-      shown.add(m);
+    if (node && node.remaining.lengthSq() > 1e-4) this.placeMarker('maneuver', node.remaining, false, R, shown);
+    for (const [m, el] of this.markers) {
+      if (!shown.has(m) && this.markerShown.get(m) !== false) {
+        el.style.display = 'none';
+        this.markerShown.set(m, false);
+      }
     }
-    for (const [m, el] of this.markers) if (!shown.has(m)) el.style.display = 'none';
+  }
+
+  private placeMarker(m: SASMode, d: Vector3, negate: boolean, R: number, shown: Set<string>): void {
+    const el = this.markers.get(m);
+    if (!el) return;
+    _dir.copy(d);
+    if (negate) _dir.negate();
+    this.navball.project(_dir, _proj);
+    if (!_proj.front) return;
+    if (this.markerShown.get(m) !== true) {
+      el.style.display = '';
+      this.markerShown.set(m, true);
+    }
+    el.style.left = `${R + _proj.x * R * 0.96}px`;
+    el.style.top = `${R - _proj.y * R * 0.96}px`;
+    shown.add(m);
   }
 
   private updateText(sim: FlightSim, v: Vessel, extra: HudExtra): void {
@@ -503,7 +594,11 @@ export class FlightHUD {
       const on = i <= sim.warpIndex && i > 0;
       pip.className = on ? `on${WARP_LEVELS[i]!.rails ? '' : ' phys'}` : '';
     }
-    this.pauseBtn.innerHTML = sim.paused ? ICONS.play : ICONS.pause;
+    if (this.pauseShown !== sim.paused) {
+      // Re-parsing the SVG icon 15× a second is pointless: only on a change
+      this.pauseShown = sim.paused;
+      this.pauseBtn.innerHTML = sim.paused ? ICONS.play : ICONS.pause;
+    }
 
     // Mission
     setText(this.mTitle, extra.missionTitle);
@@ -531,6 +626,15 @@ export class FlightHUD {
     this.setRow('mach', v.mach > 0.01 ? v.mach.toFixed(2) : '—');
     this.setRow('q', v.dynamicPressure > 1 ? `${(v.dynamicPressure / 1000).toFixed(1)} kPa` : '—', v.aeroLoad > 6000 ? 'bad' : v.dynamicPressure > 30_000 ? 'warn' : '');
     this.setRow('aoa', v.airDensity > 1e-6 ? `${(v.angleOfAttack * RAD).toFixed(1)}°` : '—', v.aeroLoad > 5000 ? 'bad' : '');
+    const wind = v.wind.length();
+    if (wind > 0.3) {
+      // Compass direction the wind blows FROM
+      const e = v.wind.dot(_east);
+      const nn = v.wind.dot(_north);
+      let from = Math.atan2(-e, -nn) * RAD;
+      if (from < 0) from += 360;
+      this.setRow('wind', `${wind.toFixed(0)} m/s from ${from.toFixed(0).padStart(3, '0')}°`, wind > 40 ? 'warn' : '');
+    } else this.setRow('wind', '—');
     const p0 = sim.predictor.count > 0 ? sim.predictor.patches[0]! : null;
     this.setRow('soi', body.name);
     if (p0 && !v.pinned) {
@@ -575,7 +679,7 @@ export class FlightHUD {
     setText(this.speedVal, formatSpeed(spd));
 
     // Heading/pitch/roll
-    const nose = new Vector3(0, 1, 0).applyQuaternion(v.q);
+    const nose = _nose.set(0, 1, 0).applyQuaternion(v.q);
     const pitch = Math.asin(Math.max(-1, Math.min(1, nose.dot(_up)))) * RAD;
     let heading = Math.atan2(nose.dot(_east), nose.dot(_north)) * RAD;
     if (heading < 0) heading += 360;
@@ -598,9 +702,22 @@ export class FlightHUD {
     this.gFill.style.height = `${Math.min(1, gf / 8) * 100}%`;
     setText(this.gVal, gf.toFixed(1));
     let heat = 0;
-    for (const p of v.parts) heat = Math.max(heat, (p.temperature - 288) / Math.max(1, p.def.maxTemp - 288));
+    // Engines run hot by design; the gauge tracks aerodynamic / re-entry heating of the airframe
+    for (const p of v.parts) if (!p.isEngine) heat = Math.max(heat, (p.temperature - 288) / Math.max(1, p.def.maxTemp - 288));
     this.heatFill.style.height = `${Math.max(0, Math.min(1, heat)) * 100}%`;
     setText(this.heatVal, `${Math.round(Math.max(0, heat) * 100)}%`);
+    // Compact warning for small screens (gauges hidden): heat first, then G
+    let chip = '';
+    let chipCls = 'warnchip';
+    if (heat > 0.4) {
+      chip = `HEAT ${Math.round(heat * 100)}%`;
+      chipCls += heat > 0.75 ? ' bad' : ' warn';
+    } else if (gf > 3) {
+      chip = `${gf.toFixed(1)} G`;
+      chipCls += gf > 6 ? ' bad' : ' warn';
+    }
+    setText(this.warnChip, chip);
+    if (this.warnChip.className !== chipCls) this.warnChip.className = chipCls;
 
     // Staging
     const stageKey = `${v.id}:${v.nextStage}:${v.stages.length}:${si.map((s) => Math.round(s.dvVac / 10)).join(',')}`;
@@ -682,5 +799,6 @@ export class FlightHUD {
     const ap = sim.autopilot;
     setText(this.apStatus, ap.mode !== 'off' ? `▶ ${ap.phase}` : ap.doneMessage);
     this.mapBtn.classList.toggle('active', extra.mapView);
+    this.root.classList.toggle('map-mode', extra.mapView);
   }
 }

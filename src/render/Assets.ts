@@ -51,7 +51,8 @@ export interface GameAssets {
   vabHdr: DataTexture | null;
 }
 
-export type TextureQuality = 'standard' | 'high';
+/** 'low' = phone tier (2k planet maps, 512 px ground detail), 'high' = 8k Earth on big GPUs. */
+export type TextureQuality = 'low' | 'standard' | 'high';
 
 export function assetUrl(path: string): string {
   return new URL(`assets/${path}`, document.baseURI).href;
@@ -81,27 +82,35 @@ export async function fetchPacked(path: string): Promise<ArrayBuffer> {
   return bytes.buffer;
 }
 
-export async function loadAssets(quality: TextureQuality, maxTextureSize: number, onProgress: (f: number, label: string) => void): Promise<GameAssets> {
+/**
+ * @param native running inside the Android package: the 8k maps and the full-size
+ *   ground-detail (PBR) textures are not shipped there, so it always uses the
+ *   512 px detail set and never asks for an 8k file.
+ */
+export async function loadAssets(quality: TextureQuality, maxTextureSize: number, onProgress: (f: number, label: string) => void, native = false): Promise<GameAssets> {
   const loader = new TextureLoader();
-  const hi = quality === 'high' && maxTextureSize >= 8192;
-  const jobs: Array<{ key: string; url: string; srgb: boolean; repeat?: boolean }> = [
-    { key: 'earthDay', url: hi ? 'earth/day_8k.jpg' : 'earth/day_4k.jpg', srgb: true },
-    { key: 'earthNight', url: 'earth/night_4k.jpg', srgb: true },
-    { key: 'earthClouds', url: hi ? 'earth/clouds_8k.jpg' : 'earth/clouds_4k.jpg', srgb: false },
-    { key: 'earthNormal', url: 'earth/normal_4k.jpg', srgb: false },
-    { key: 'earthMask', url: 'earth/coast_sdf_4k.png', srgb: false },
-    { key: 'moonColor', url: 'moon/color_4k.jpg', srgb: true },
-    { key: 'moonNormal', url: 'moon/normal_4k.jpg', srgb: false },
-    { key: 'marsColor', url: 'mars/color_4k.jpg', srgb: true },
-    { key: 'marsNormal', url: 'mars/normal_4k.jpg', srgb: false },
-    { key: 'milkyWay', url: 'sky/milkyway_4k.jpg', srgb: true },
+  const hi = quality === 'high' && maxTextureSize >= 8192 && !native;
+  const lo = quality === 'low' || maxTextureSize < 4096;
+  const k = lo ? '2k' : '4k';
+  const jobs: Array<{ key: string; url: string; srgb: boolean; repeat?: boolean; fallback?: string }> = [
+    { key: 'earthDay', url: hi ? 'earth/day_8k.jpg' : `earth/day_${k}.jpg`, fallback: `earth/day_${k}.jpg`, srgb: true },
+    { key: 'earthNight', url: `earth/night_${k}.jpg`, srgb: true },
+    { key: 'earthClouds', url: hi ? 'earth/clouds_8k.jpg' : `earth/clouds_${k}.jpg`, fallback: `earth/clouds_${k}.jpg`, srgb: false },
+    { key: 'earthNormal', url: `earth/normal_${k}.jpg`, srgb: false },
+    { key: 'earthMask', url: `earth/coast_sdf_${k}.png`, srgb: false },
+    { key: 'moonColor', url: `moon/color_${k}.jpg`, srgb: true },
+    { key: 'moonNormal', url: `moon/normal_${k}.jpg`, srgb: false },
+    { key: 'marsColor', url: `mars/color_${k}.jpg`, srgb: true },
+    { key: 'marsNormal', url: `mars/normal_${k}.jpg`, srgb: false },
+    { key: 'milkyWay', url: `sky/milkyway_${k}.jpg`, srgb: true },
     { key: 'water', url: 'water/normal.png', srgb: false, repeat: true },
   ];
   const pbrNames = ['grass', 'sand', 'concrete', 'rock', 'regolith'] as const;
+  const px = lo || native ? '_512' : '';
   for (const n of pbrNames) {
-    jobs.push({ key: `pbr.${n}.diff`, url: `pbr/${n}_diff.jpg`, srgb: true, repeat: true });
-    jobs.push({ key: `pbr.${n}.nor`, url: `pbr/${n}_nor.jpg`, srgb: false, repeat: true });
-    jobs.push({ key: `pbr.${n}.rough`, url: `pbr/${n}_rough.jpg`, srgb: false, repeat: true });
+    jobs.push({ key: `pbr.${n}.diff`, url: `pbr/${n}_diff${px}.jpg`, srgb: true, repeat: true });
+    jobs.push({ key: `pbr.${n}.nor`, url: `pbr/${n}_nor${px}.jpg`, srgb: false, repeat: true });
+    jobs.push({ key: `pbr.${n}.rough`, url: `pbr/${n}_rough${px}.jpg`, srgb: false, repeat: true });
   }
   const total = jobs.length + 2;
   let done = 0;
@@ -110,9 +119,25 @@ export async function loadAssets(quality: TextureQuality, maxTextureSize: number
     onProgress(done / total, label);
   };
   const results = new Map<string, Texture>();
+  // three's image loader rejects with a bare DOM Event: turn that into an error
+  // that names the file, and let the optional 8k maps fall back to the 4k ones
+  const load = async (j: (typeof jobs)[number]): Promise<Texture> => {
+    try {
+      return await loader.loadAsync(assetUrl(j.url));
+    } catch (e) {
+      if (j.fallback && j.fallback !== j.url) {
+        try {
+          return await loader.loadAsync(assetUrl(j.fallback));
+        } catch {
+          /* report the original file below */
+        }
+      }
+      throw new Error(`Failed to load texture ${j.url}${e instanceof Error ? `: ${e.message}` : ''}`);
+    }
+  };
   await Promise.all(
     jobs.map(async (j) => {
-      const t = await loader.loadAsync(assetUrl(j.url));
+      const t = await load(j);
       t.colorSpace = j.srgb ? SRGBColorSpace : NoColorSpace;
       t.minFilter = LinearMipmapLinearFilter;
       t.anisotropy = 8;

@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { layoutCraft, totalCost } from '../src/parts/Craft';
 import { analyzeStages, simPartsFromLayout, totalDv } from '../src/parts/DeltaV';
-import { planStages } from '../src/parts/Staging';
+import { planStages, stagesFromCraft } from '../src/parts/Staging';
 import { TEMPLATES } from '../src/parts/Templates';
 
 function report(id: string) {
@@ -56,6 +56,23 @@ describe('Templates', () => {
   it('Heron Selene lander has lunar landing budget', () => {
     const { stages } = report('heron-lander');
     expect(totalDv(stages)).toBeGreaterThan(14000);
+  });
+
+  it('Nimbus reaches a 600 km polar orbit', () => {
+    const { stages } = report('nimbus');
+    expect(stages[0]!.twrSL).toBeGreaterThan(1.2);
+    // ~9.4 km/s to LEO + ~0.5 km/s for a retrograde-ish polar orbit + ~0.3 km/s higher
+    expect(totalDv(stages)).toBeGreaterThan(10_600);
+  });
+
+  it('Ares has a Mars mission budget and lands chute-first', () => {
+    const { craft, layout, stages } = report('ares');
+    expect(stages[0]!.twrSL).toBeGreaterThan(1.15);
+    // LEO 9.4 + TMI 3.6 + corrections 0.3 + capture/landing ~1.0
+    expect(totalDv(stages)).toBeGreaterThan(14_500);
+    const plan = stagesFromCraft(craft).map((s) => s.map((u) => layout.get(u)!.def.id).sort().join('+'));
+    expect(plan[plan.length - 2]).toBe('chute-main');
+    expect(plan[plan.length - 1]).toBe('decoupler-stack+eng-moth');
   });
 
   it('Colossus can fly a direct-ascent lunar mission', () => {

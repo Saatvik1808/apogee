@@ -45,8 +45,10 @@ import {
   refreshNodeTarget,
   updateNodeRemaining,
   type ManeuverNode,
+  burnLeadTime,
 } from './Maneuver';
 import { Vessel } from './Vessel';
+import { WindField } from '../physics/Wind';
 import { VesselPhysics, type ControlCommand, type FlightEvent } from './VesselPhysics';
 
 export interface WarpLevel {
@@ -129,6 +131,10 @@ export class FlightSim {
   private stageCooldown = 0;
 
   constructor(system: SolarSystem, craft: CraftData, site: LaunchSite, startTime: number) {
+    // Each launch day and site has its own (reproducible) weather
+    let seed = Math.floor(startTime / 3600) * 2654435761;
+    for (let i = 0; i < site.id.length; i++) seed = (seed ^ site.id.charCodeAt(i)) * 16777619;
+    this.physics.wind = new WindField(seed >>> 0);
     this.system = system;
     this.time = startTime;
     this.renderTime = startTime;
@@ -366,8 +372,10 @@ export class FlightSim {
       if (v.pinned) {
         this.updatePinned(v);
         this.physics.updateEnvironment(v);
-        // Engines on a pinned vessel (clamped prelaunch or landed): release when thrusting
-        if (v.situation !== 'prelaunch' && v.controls.throttle > 0 && v.parts.some((p) => p.engineIgnited && (p.engineRunning || p.isSolid || p.ignitionsLeft > 0))) {
+        // Engines on a pinned vessel (clamped prelaunch or landed): release when an
+        // engine can actually run — ignited, with propellant to burn (a dry stage
+        // pressing the throttle must not unpin, or it would flap landed/flying)
+        if (v.situation !== 'prelaunch' && v.controls.throttle > 0 && this.canThrust(v)) {
           v.pinned = false;
           v.situation = 'flying';
           v.settledTime = 0;
@@ -395,21 +403,42 @@ export class FlightSim {
     this.updateFairings(dt);
     this.cullVessels();
     if (this.stageCooldown > 0) this.stageCooldown -= dt;
-    // Liftoff detection
-    if (isNaN(this.launchTime) && active.situation === 'flying' && active.altitude - active.terrainHeight > 1 && !active.pinned) {
+    // Liftoff detection: the lowest point of the vehicle has left the ground (the
+    // centre of mass is always metres above it, even sitting on the pad)
+    if (isNaN(this.launchTime) && active.situation === 'flying' && active.radarAltitude > 1 && !active.pinned) {
       this.launchTime = this.time;
       this.physics.emit('liftoff', active, 'Liftoff!');
     }
-    this.predictionDirty = true;
+  }
+
+  /** True if some ignited engine of v can run right now (or a solid still has grain). */
+  private canThrust(v: Vessel): boolean {
+    for (const p of v.parts) {
+      if (!p.isEngine || !p.engineIgnited) continue;
+      if (p.isSolid) {
+        if (p.fuel > 0) return true;
+        continue;
+      }
+      if (p.engineRunning) return true;
+      if (p.ignitionsLeft > 0 && v.engineFuel(p) > 0) return true;
+    }
+    return false;
   }
 
   private railsAdvance(dtSim: number): void {
+    const tStart = this.time;
     let tEnd = this.time + dtSim;
     let hitEvent = false;
     const v = this.active;
     if (!v.pinned && !v.destroyed) {
-      // Refresh prediction for event times
-      this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 2, target: this.target });
+      // Event times come from the trajectory prediction. On rails the conic does
+      // not change between frames, so the cached prediction stays valid until a
+      // discrete event (SOI change, staging, node edit) marks it dirty or the
+      // vessel runs past its first patch — re-predicting every frame cost ~4 ms
+      // per frame on an interplanetary cruise (encounter scans of every planet).
+      const cached = this.predictor.count > 0 ? this.predictor.patches[0]! : null;
+      const valid = cached && !this.predictionDirty && cached.body === v.body && this.time >= cached.startTime - 1e-6 && this.time <= cached.endTime + 1e-6;
+      if (!valid) this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 2, target: this.target });
       const p0 = this.predictor.patches[0]!;
       if (p0.endReason !== 'none' && p0.endTime < tEnd) {
         tEnd = p0.endReason === 'impact' ? Math.max(this.time, p0.endTime - 30) : p0.endTime + 1e-3;
@@ -421,7 +450,8 @@ export class FlightSim {
       }
     }
     for (const n of this.nodes) {
-      const lead = 60;
+      // Drop out of warp early enough to start a long burn on time
+      const lead = Math.max(60, burnLeadTime(this.active, n.remaining.length(), 30));
       if (n.time - lead > this.time && n.time - lead < tEnd) {
         tEnd = n.time - lead;
         hitEvent = true;
@@ -436,7 +466,7 @@ export class FlightSim {
         continue;
       }
       if (!ves.onRails) {
-        ves.railsOrbit.setFromState(ves.r, ves.v, ves.body.mu, this.time - dtSim);
+        ves.railsOrbit.setFromState(ves.r, ves.v, ves.body.mu, tStart);
         ves.onRails = true;
       }
       ves.railsOrbit.getStateAt(this.time, ves.r, ves.v);
@@ -448,9 +478,29 @@ export class FlightSim {
       }
       this.updateSituationRails(ves);
     }
+    this.holdAttitudeOnRails();
     this.cullVessels();
-    this.predictionDirty = true;
     if (hitEvent) this.setWarpIndex(0);
+  }
+
+  /**
+   * On rails there is no rotational physics, so a vessel holding a direction
+   * (autopilot burn, SAS prograde…) simply keeps pointing there — otherwise a
+   * heavy stack would have to spend minutes turning when warp ends, and a long
+   * burn would start late.
+   */
+  private holdAttitudeOnRails(): void {
+    const v = this.active;
+    if (v.pinned || v.destroyed) return;
+    let dir: Vector3 | null = null;
+    const ap = this.autopilot;
+    if (ap.mode === 'node' && this.nodes[0] && this.nodes[0].remaining.lengthSq() > 1e-6) dir = _t.copy(this.nodes[0].remaining).normalize();
+    else if (ap.mode === 'off') dir = this.sasTargetDirection(v, _t);
+    if (!dir) return;
+    v.forward(_a);
+    _q.setFromUnitVectors(_a, dir);
+    v.q.premultiply(_q).normalize();
+    v.w.set(0, 0, 0);
   }
 
   private computeCommand(v: Vessel): ControlCommand {
@@ -505,6 +555,7 @@ export class FlightSim {
   stage(): boolean {
     const v = this.active;
     if (v.destroyed || this.stageCooldown > 0) return false;
+    v.pruneEmptyStages();
     if (v.nextStage >= v.stages.length) return false;
     if (this.warp.rails) this.setWarpIndex(0);
     const uids = v.stages[v.nextStage]!;
@@ -540,6 +591,9 @@ export class FlightSim {
       this.attitude.resetHold(v);
     }
     v.computeMassProperties(true);
+    // A landed (pinned) vessel that just dropped a stage has a new centre of mass:
+    // re-anchor it, or the remaining stack renders sunk into the ground until liftoff
+    if (v.pinned) v.pinnedPos.copy(v.r).applyQuaternion(v.body.rotationInverse);
     this.predictionDirty = true;
     return true;
   }
@@ -562,6 +616,20 @@ export class FlightSim {
       if (d.radial) child.w.set(0, 0, 0.12).applyQuaternion(p.rotation);
       this.vessels.push(child);
       this.physics.emit('decouple', v, 'Stage separation', p);
+      // The root part stays with `v`; if the command module (and thus control)
+      // went with the separated section, THAT is the vessel the player flies on
+      if (v === this.active && !v.isControllable && child.isControllable) {
+        child.name = v.name;
+        v.name = `${v.name} debris`;
+        child.debris = false;
+        v.debris = true;
+        child.controls.throttle = v.controls.throttle;
+        child.controls.sas = v.controls.sas;
+        child.controls.sasMode = v.controls.sasMode;
+        v.controls.throttle = 0;
+        this.active = child;
+        this.attitude.resetHold(child);
+      }
     }
   }
 
@@ -672,6 +740,7 @@ export class FlightSim {
     p.parent = null;
     v.parts = v.parts.filter((x) => x !== p);
     v.stages = v.stages.map((s) => s.filter((u) => u !== p.uid));
+    v.pruneEmptyStages();
     v.refreshStructure();
     v.computeMassProperties(true);
     if (!v.isControllable && v === this.active && !v.debris) {
@@ -717,12 +786,15 @@ export class FlightSim {
     const surfSpeed = v.surfaceVelocity.length();
     if (v.touchingGround || v.inWater) {
       const prev = v.situation;
-      // Scraping the pad during the first moments of a liftoff isn't a landing
-      const takingOff = prev === 'flying' && v.airborneTime < 1.5 && v.totalThrust > v.mass * (v.body.mu / v.r.lengthSq());
+      // Scraping the ground during the first moments of a liftoff isn't a landing:
+      // engines still spooling up let the stack settle back for an instant, both
+      // on the pad and when lifting off again from the Moon or Mars
+      const justLaunched = !isNaN(this.launchTime) && this.time - this.launchTime < 4;
+      const takingOff = prev === 'flying' && v.airborneTime < 1.5 && (justLaunched || v.totalThrust > 0);
       if (takingOff) return;
       if (prev !== 'landed' && prev !== 'splashed' && prev !== 'prelaunch') {
-        if (v.inWater) this.physics.emit('splashdown', v, `Splashdown at ${surfSpeed.toFixed(1)} m/s`);
-        else this.physics.emit('touchdown', v, `Touchdown at ${surfSpeed.toFixed(1)} m/s`);
+        if (v.inWater) this.physics.emit('splashdown', v, `Splashdown at ${surfSpeed.toFixed(1)} m/s`, undefined, surfSpeed);
+        else this.physics.emit('touchdown', v, `Touchdown at ${surfSpeed.toFixed(1)} m/s`, undefined, surfSpeed);
       }
       v.airborneTime = 0;
       v.situation = v.inWater ? 'splashed' : 'landed';
@@ -787,9 +859,11 @@ export class FlightSim {
         this.prevBody.delete(v.id);
       }
     }
-    // Keep the debris count bounded
-    const debris = this.vessels.filter((x) => x.debris && x !== act);
-    if (debris.length > 40) {
+    // Keep the debris count bounded (count first: this runs every physics step)
+    let nDebris = 0;
+    for (const x of this.vessels) if (x.debris && x !== act) nDebris++;
+    if (nDebris > 40) {
+      const debris = this.vessels.filter((x) => x.debris && x !== act);
       debris.sort((a, b) => b.age - a.age);
       for (const d of debris.slice(0, debris.length - 40)) d.destroyed = true;
     }
@@ -806,9 +880,13 @@ export class FlightSim {
       this.predictor.count = 0;
       return;
     }
+    // A coasting orbit only changes at discrete events (staging, SOI change, node
+    // edits), which set predictionDirty; otherwise a timer sets the cadence — fast
+    // while the orbit is actually changing (thrust or drag), 5 Hz when coasting.
+    // Each prediction is up to four conic patches with encounter scans, so running
+    // it every rendered frame was the single biggest CPU cost of a coast.
     const thrusting = v.totalThrust > 0 || v.inAtmosphere;
     if (!this.predictionDirty && this.predictTimer > 0) return;
-    if (thrusting && this.predictTimer > 0 && !this.warp.rails) return;
     this.predictTimer = thrusting ? 0.05 : 0.2;
     this.predictionDirty = false;
     if (v.pinned && v.situation !== 'landed') {
@@ -841,7 +919,10 @@ export class FlightSim {
   private nodePatch(n: ManeuverNode): number {
     const idx = this.patchAt(n.time);
     if (idx >= 0) return idx;
-    if (n.burning && n.time <= this.time && this.predictor.count > 0 && this.predictor.patches[0]!.body === n.body) return 0;
+    // A burn centred on the node — or one that started late because the vessel was
+    // still turning — runs past the node time; the current orbit is the reference
+    const recent = n.time <= this.time && this.time - n.time < 3600;
+    if ((n.burning || recent) && this.predictor.count > 0 && this.predictor.patches[0]!.body === n.body) return 0;
     return -1;
   }
 
@@ -875,6 +956,18 @@ export class FlightSim {
     const v = this.active;
     for (let i = this.nodes.length - 1; i >= 0; i--) {
       const n = this.nodes[i]!;
+      // Only the NEXT node can be the one being executed: thrust near a later
+      // node's time must not freeze that node's plan onto the pre-burn orbit
+      if (i === 0 && v.totalThrust > 0 && Math.abs(n.time - this.time) < 3600) {
+        n.burning = true;
+        n.lastThrust = this.time;
+      }
+      // A burn flown by hand is over once the engines have been quiet for a while
+      // past the node; drop it, or it would steer SAS "maneuver" forever
+      if (n.burning && this.time > n.time && v.totalThrust <= 0 && (isNaN(n.lastThrust) || this.time - n.lastThrust > 20)) {
+        this.nodes.splice(i, 1);
+        continue;
+      }
       const idx = this.nodePatch(n);
       if (idx < 0 || this.predictor.patches[idx]!.body !== n.body) {
         // Node no longer lies on the predicted path (e.g. far in the past)
@@ -882,7 +975,6 @@ export class FlightSim {
         continue;
       }
       const orbit = this.predictor.patches[idx]!.orbit;
-      if (v.totalThrust > 0 && Math.abs(n.time - this.time) < 3600) n.burning = true;
       if (!n.burning) refreshNodeTarget(n, orbit);
       if (v.body === n.body) updateNodeRemaining(n, orbit, v.r, v.v);
       else updateNodeRemaining(n, orbit);
@@ -891,7 +983,7 @@ export class FlightSim {
     const n0 = this.nodes[0];
     if (n0) {
       const idx = this.nodePatch(n0);
-      if (idx >= 0) {
+      if (idx >= 0 && this.predictor.patches[idx]!.body === n0.body) {
         const orbit = this.predictor.patches[idx]!.orbit;
         nodeStateAfter(n0, orbit, _r, _v);
         this.nodePredictor.predict(n0.body, _r, _v, n0.time, { maxPatches: 4, target: this.target });

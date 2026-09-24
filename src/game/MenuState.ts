@@ -17,8 +17,11 @@ import { h, clear } from '../ui/dom';
 import { LAUNCH_SITES } from '../world/LaunchSites';
 import type { GameContext, GameState } from './GameContext';
 import { MISSIONS, type LaunchTimeOfDay, type MissionDef } from './Missions';
+import { buildSettingsPanel } from '../ui/SettingsPanel';
+import { playDialogue } from '../ui/StoryUI';
+import { CHAPTERS, STORY } from './story/Story';
+import { CAST, portraitSvg } from './story/Characters';
 import { writeSave } from './Save';
-import { applyQuality } from './Quality';
 
 export interface MenuCallbacks {
   onCampaign(m: MissionDef): void;
@@ -37,8 +40,9 @@ export class MenuState implements GameState {
   private t = 0;
   private readonly camAbs = new Vector3();
   private readonly camQ = new Quaternion();
+  private readonly unbindBack: () => void;
 
-  constructor(ctx: GameContext, cb: MenuCallbacks) {
+  constructor(ctx: GameContext, focusMission: string | null, cb: MenuCallbacks) {
     this.ctx = ctx;
     this.cb = cb;
     this.panel = h('div', { class: 'menu-panel' });
@@ -50,20 +54,25 @@ export class MenuState implements GameState {
       h('div', { class: 'menu-left' },
         h('div', { class: 'menu-logo' }, h('div', { class: 'logo', text: 'APOGEE' }), h('div', { class: 'tag', text: 'Real-scale space program' })),
         h('div', { class: 'menu-btns' },
-          btn('Campaign', 'From sounding rockets to the Moon', () => this.showCampaign(), true),
+          btn('Campaign', 'Four chapters: from sounding rockets to Mars', () => this.showCampaign(), true),
           btn('Sandbox', 'Build anything in the assembly building', () => cb.onSandbox()),
           btn('Quick launch', 'Fly a reference rocket right now', () => this.showQuick()),
-          btn('Settings', 'Graphics, audio', () => this.showSettings()),
+          btn('Settings', 'Graphics presets, controls, audio', () => this.showSettings()),
           btn('Credits', 'Data sources & licences', () => this.showCredits()),
         ),
-        h('div', { class: 'menu-device', text: 'APOGEE is built for a desktop browser with a keyboard and mouse. On this screen you can explore the menus and the assembly building; flying needs a keyboard.' }),
         h('div', { class: 'menu-foot mono', text: 'Real Earth & Moon at true scale · patched-conic orbital mechanics · physically based atmosphere' }),
       ),
       this.panel,
     );
     ctx.ui.appendChild(this.root);
+    this.unbindBack = ctx.platform.pushBack(() => {
+      if (!this.panel.childElementCount) return false;
+      clear(this.panel);
+      return true;
+    });
     ctx.audio.setMusicIntensity(1);
     ctx.space.hemi.visible = true;
+    if (focusMission) this.showCampaign(focusMission);
     // Start near sunrise over the Pacific
     this.t = 0;
   }
@@ -73,39 +82,84 @@ export class MenuState implements GameState {
     this.panel.appendChild(h('div', { class: 'mp-card card' }, h('div', { class: 'mp-h' }, h('span', { text: title }), h('button', { class: 'btn ghost small', text: '✕', onClick: () => clear(this.panel) })), ...content));
   }
 
-  private showCampaign(): void {
-    const done = new Set(this.ctx.save.campaign.completed);
+  /** Chapter intro (first time only) and the mission briefing, then continue. */
+  private async brief(m: MissionDef): Promise<void> {
+    const camp = this.ctx.save.campaign;
+    const ch = CHAPTERS.find((c) => c.n === m.chapter);
+    if (ch && !camp.storySeen.includes(`ch${ch.n}`)) {
+      await playDialogue(this.ctx.ui, ch.intro, { kicker: `Chapter ${ch.n} · ${ch.tagline}`, title: ch.title });
+      camp.storySeen.push(`ch${ch.n}`);
+      writeSave(this.ctx.save);
+    }
+    const st = STORY[m.id];
+    if (st) await playDialogue(this.ctx.ui, st.brief, { kicker: `Mission briefing · ${LAUNCH_SITES.find((x) => x.id === m.site)?.short ?? ''}`, title: m.title, doneLabel: 'Go ▸' });
+  }
+
+  private showCampaign(focus?: string): void {
+    const camp = this.ctx.save.campaign;
+    const done = new Set(camp.completed);
+    const unlockAll = new URLSearchParams(location.search).has('unlock');
     const list = h('div', { class: 'mission-list' });
     const detail = h('div', { class: 'mission-detail' });
+    const starText = (n: number) => `${'★'.repeat(n)}${'☆'.repeat(3 - n)}`;
     const select = (m: MissionDef, unlocked: boolean) => {
       clear(detail);
-      detail.appendChild(h('div', { class: 'md-kicker', text: `${'★'.repeat(m.difficulty)}${'☆'.repeat(5 - m.difficulty)}  ·  ${LAUNCH_SITES.find((s) => s.id === m.site)?.short ?? ''}` }));
+      const ch = CHAPTERS.find((c) => c.n === m.chapter);
+      detail.appendChild(h('div', { class: 'md-kicker', text: `Chapter ${m.chapter} · ${ch?.title ?? ''}  ·  ${LAUNCH_SITES.find((s) => s.id === m.site)?.short ?? ''}` }));
       detail.appendChild(h('div', { class: 'md-title', text: m.title }));
-      detail.appendChild(h('div', { class: 'md-sub', text: m.subtitle }));
+      detail.appendChild(h('div', { class: 'md-sub', text: `${m.subtitle}  ·  difficulty ${'●'.repeat(m.difficulty)}${'○'.repeat(5 - m.difficulty)}` }));
+      const first = STORY[m.id]?.brief[0];
+      if (first) {
+        detail.appendChild(
+          h('div', { class: 'md-quote' },
+            h('div', { class: 'mq-p', html: portraitSvg(first.who, 40) }),
+            h('div', {}, h('div', { class: 'mq-n', text: CAST[first.who].name, style: `color:${CAST[first.who].color}` }), h('div', { class: 'mq-t', text: `“${first.text}”` })),
+          ),
+        );
+      }
       detail.appendChild(h('p', { class: 'md-brief', text: m.briefing }));
       const ol = h('ol', { class: 'md-obj' });
       for (const o of m.objectives) ol.appendChild(h('li', { text: o.text }));
       detail.appendChild(ol);
+      const best = camp.scores[m.id] ?? 0;
+      detail.appendChild(h('div', { class: 'md-bonus-h', text: `Bonus stars · best ${done.has(m.id) ? starText(Math.max(1, best)) : '—'}` }));
+      const ul = h('ul', { class: 'md-bonus' });
+      for (const b of m.bonus) ul.appendChild(h('li', { text: b.text }));
+      detail.appendChild(ul);
       const tpl = TEMPLATES.find((t) => t.id === m.template);
       detail.appendChild(
         h('div', { class: 'md-actions' },
-          h('button', { class: 'btn primary', text: 'Design rocket', disabled: !unlocked, onClick: () => this.cb.onCampaign(m) }),
-          h('button', { class: 'btn', text: `Fly ${tpl ? tpl.name : 'reference'}`, disabled: !unlocked, onClick: () => this.cb.onMission(m) }),
+          h('button', { class: 'btn primary', text: `Fly ${tpl ? tpl.name : 'mission'}`, disabled: !unlocked, onClick: () => void this.brief(m).then(() => this.cb.onMission(m)) }),
+          h('button', { class: 'btn', text: 'Design my own rocket', disabled: !unlocked, onClick: () => void this.brief(m).then(() => this.cb.onCampaign(m)) }),
         ),
       );
+      for (const el of list.querySelectorAll('.mission-item')) el.classList.toggle('sel', (el as HTMLElement).dataset.id === m.id);
     };
+    let lastChapter = 0;
+    let firstOpen: { m: MissionDef; unlocked: boolean } | null = null;
     MISSIONS.forEach((m, i) => {
-      const unlocked = i === 0 || done.has(MISSIONS[i - 1]!.id) || done.has(m.id) || new URLSearchParams(location.search).has('unlock');
-      const item = h('div', { class: `mission-item${done.has(m.id) ? ' done' : ''}${unlocked ? '' : ' locked'}`, onClick: () => select(m, unlocked) },
+      if (m.chapter !== lastChapter) {
+        lastChapter = m.chapter;
+        const ch = CHAPTERS.find((c) => c.n === m.chapter)!;
+        const total = MISSIONS.filter((x) => x.chapter === m.chapter);
+        const got = total.reduce((sum, x) => sum + (camp.scores[x.id] ?? (done.has(x.id) ? 1 : 0)), 0);
+        list.appendChild(h('div', { class: 'chapter-h' }, h('span', { class: 'ch-n', text: `Chapter ${ch.n}` }), h('span', { class: 'ch-t', text: ch.title }), h('span', { class: 'ch-s mono', text: `${got}/${total.length * 3}★` })));
+      }
+      const unlocked = i === 0 || done.has(MISSIONS[i - 1]!.id) || done.has(m.id) || unlockAll;
+      const stars = done.has(m.id) ? Math.max(1, camp.scores[m.id] ?? 1) : 0;
+      const item = h('div', { class: `mission-item${done.has(m.id) ? ' done' : ''}${unlocked ? '' : ' locked'}`, dataset: { id: m.id }, onClick: () => (this.ctx.audio.click(), select(m, unlocked)) },
         h('span', { class: 'mi-n', text: String(i + 1).padStart(2, '0') }),
         h('span', { class: 'mi-t', text: m.title }),
-        h('span', { class: 'mi-s', text: done.has(m.id) ? '✓' : unlocked ? '' : '🔒' }),
+        h('span', { class: 'mi-s', text: done.has(m.id) ? starText(stars) : unlocked ? '' : '🔒' }),
       );
       list.appendChild(item);
+      if (focus === m.id || (!focus && !firstOpen && unlocked && !done.has(m.id))) firstOpen = { m, unlocked };
     });
-    const first = MISSIONS.find((m, i) => !done.has(m.id) && (i === 0 || done.has(MISSIONS[i - 1]!.id))) ?? MISSIONS[0]!;
-    select(first, true);
+    const open = firstOpen as { m: MissionDef; unlocked: boolean } | null;
     this.setPanel('Campaign', h('div', { class: 'campaign' }, list, detail));
+    if (open) select(open.m, open.unlocked);
+    else select(MISSIONS[MISSIONS.length - 1]!, true);
+    list.querySelector('.mission-item.sel')?.scrollIntoView({ block: 'nearest' });
   }
 
   private showQuick(): void {
@@ -153,7 +207,7 @@ export class MenuState implements GameState {
         h('div', { class: 'ql-label', text: 'Launch site' }),
         seg(LAUNCH_SITES.map((s) => [s.id, s.short] as [string, string]), () => site, (v) => (site = v)),
         h('div', { class: 'ql-label', text: 'Local time' }),
-        seg([['dawn', 'Dawn'], ['morning', 'Morning'], ['noon', 'Noon'], ['dusk', 'Dusk'], ['night', 'Night'], ['lunar', 'Lunar window']] as Array<[LaunchTimeOfDay, string]>, () => tod, (v) => (tod = v)),
+        seg([['dawn', 'Dawn'], ['morning', 'Morning'], ['noon', 'Noon'], ['dusk', 'Dusk'], ['night', 'Night'], ['lunar', 'Lunar window'], ['mars', 'Mars window']] as Array<[LaunchTimeOfDay, string]>, () => tod, (v) => (tod = v)),
         info,
         h('div', { class: 'md-actions' },
           h('button', { class: 'btn primary', text: 'Go for launch', onClick: () => this.cb.onQuickLaunch(tpl, site, tod) }),
@@ -163,43 +217,7 @@ export class MenuState implements GameState {
   }
 
   private showSettings(): void {
-    const s = this.ctx.save.settings;
-    const save = () => {
-      writeSave(this.ctx.save);
-      applyQuality(this.ctx);
-    };
-    const range = (label: string, get: () => number, set: (v: number) => void) =>
-      h('label', { class: 'set-row' }, h('span', { text: label }),
-        h('input', { type: 'range', attrs: { min: '0', max: '1', step: '0.05' }, value: String(get()), onInput: (e) => (set(Number((e.target as HTMLInputElement).value)), save()) }));
-    const check = (label: string, get: () => boolean, set: (v: boolean) => void) => {
-      const inp = h('input', { type: 'checkbox', onChange: (e) => (set((e.target as HTMLInputElement).checked), save()) });
-      inp.checked = get();
-      return h('label', { class: 'set-row' }, h('span', { text: label }), inp);
-    };
-    const quality = h('div', { class: 'seg-ctl' });
-    const drawQ = () => {
-      clear(quality);
-      for (const q of ['low', 'medium', 'high', 'ultra'] as const) {
-        quality.appendChild(h('button', { class: `btn small${s.quality === q ? ' active' : ''}`, text: q, onClick: () => ((s.quality = q), save(), drawQ()) }));
-      }
-    };
-    drawQ();
-    this.setPanel(
-      'Settings',
-      h('div', { class: 'settings' },
-        h('div', { class: 'ql-label', text: 'Graphics quality' }),
-        quality,
-        check('Volumetric-style clouds', () => s.clouds, (v) => (s.clouds = v)),
-        check('Bloom & lens flare', () => s.bloom, (v) => (s.bloom = v)),
-        check('Film grain', () => s.grain, (v) => (s.grain = v)),
-        check('Show FPS', () => s.showFps, (v) => (s.showFps = v)),
-        h('div', { class: 'ql-label', text: 'Audio' }),
-        range('Master', () => s.master, (v) => ((s.master = v), (this.ctx.audio.settings.master = v), this.ctx.audio.applySettings())),
-        range('Effects', () => s.sfx, (v) => ((s.sfx = v), (this.ctx.audio.settings.sfx = v), this.ctx.audio.applySettings())),
-        range('Music', () => s.music, (v) => ((s.music = v), (this.ctx.audio.settings.music = v), this.ctx.audio.applySettings())),
-        check('Mission control voice', () => s.voice, (v) => ((s.voice = v), (this.ctx.audio.settings.voice = v))),
-      ),
-    );
+    this.setPanel('Settings', buildSettingsPanel(this.ctx));
   }
 
   private showCredits(): void {
@@ -222,6 +240,9 @@ export class MenuState implements GameState {
 
   update(dt: number): void {
     this.t += dt;
+    // The menu does not use pointer input on the canvas: discard it, or it
+    // would be applied by the next state's first frame
+    this.ctx.input.flush();
     const sys = this.ctx.system;
     // Advance real time slowly for a living backdrop
     sys.update(sys.time + dt * 20);
@@ -255,6 +276,7 @@ export class MenuState implements GameState {
   }
 
   dispose(): void {
+    this.unbindBack();
     this.root.remove();
   }
 }

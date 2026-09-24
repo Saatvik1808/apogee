@@ -134,6 +134,7 @@ export class Navball {
   private readonly scene = new Scene();
   private readonly camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
   private readonly mat: ShaderMaterial;
+  private readonly quad: Mesh;
   /** Vessel axes in world space (right, dorsal, nose), updated each frame. */
   readonly right = new Vector3(1, 0, 0);
   readonly dorsal = new Vector3(0, 0, 1);
@@ -147,9 +148,16 @@ export class Navball {
       depthTest: false,
       depthWrite: false,
     });
-    const quad = new Mesh(new PlaneGeometry(2, 2), this.mat);
-    quad.frustumCulled = false;
-    this.scene.add(quad);
+    this.quad = new Mesh(new PlaneGeometry(2, 2), this.mat);
+    this.quad.frustumCulled = false;
+    this.scene.add(this.quad);
+  }
+
+  /** Free the 2048×1024 ball texture and the quad (one navball is built per flight). */
+  dispose(): void {
+    (this.mat.uniforms.tBall!.value as CanvasTexture).dispose();
+    this.mat.dispose();
+    this.quad.geometry.dispose();
   }
 
   /**

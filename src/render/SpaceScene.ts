@@ -13,7 +13,6 @@
  * CPU-side lighting queries
  */
 import {
-  Color,
   DirectionalLight,
   HemisphereLight,
   Matrix3,
@@ -47,6 +46,8 @@ interface PlanetView {
 export interface SceneQuality {
   lodBias: number;
   clouds: boolean;
+  /** Particle density multiplier (smoke, sparks, dust). */
+  effects: number;
   maxLevel: { earth: number; moon: number; mars: number };
 }
 
@@ -75,7 +76,7 @@ export class SpaceScene {
   atmosphereBody: CelestialBody | null = null;
   exposure = 0.42;
   private currentLUTs: AtmosphereLUTs | null = null;
-  quality: SceneQuality = { lodBias: 1, clouds: true, maxLevel: { earth: 17, moon: 16, mars: 16 } };
+  quality: SceneQuality = { lodBias: 1, clouds: true, effects: 1, maxLevel: { earth: 17, moon: 16, mars: 16 } };
   /** Altitude of the camera above the nearest body's surface (m). */
   cameraAltitude = 0;
   nearestBody: CelestialBody | null = null;
@@ -283,7 +284,8 @@ export class SpaceScene {
       this.hemi.position.copy(up);
     } else {
       this.hemi.color.setRGB(0.002, 0.002, 0.003);
-      this.hemi.groundColor.set(new Color(0.01, 0.015, 0.02).multiplyScalar(nearest === earth ? 4 : 1));
+      const shine = nearest === earth ? 4 : 1;
+      this.hemi.groundColor.setRGB(0.01 * shine, 0.015 * shine, 0.02 * shine);
       this.hemi.intensity = 1;
       this.hemi.position.copy(camAbs).sub(nearest.position).normalize();
     }

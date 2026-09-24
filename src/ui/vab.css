@@ -596,3 +596,64 @@
     display: none;
   }
 }
+
+/* ---------------------------------------------------------- touch & phones */
+.vab-stats-toggle {
+  display: none;
+}
+.vab-touchbar {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  z-index: 5;
+}
+.vab-touchbar[data-mode='sel'] .hold,
+.vab-touchbar[data-mode='hold'] .sel {
+  display: none;
+}
+.vab-touchbar .btn {
+  padding: 10px 16px;
+  font-size: 13px;
+}
+.vab-touchbar .danger {
+  color: var(--red);
+}
+.vab.touch .vab-hint {
+  display: block;
+  max-width: min(560px, calc(100vw - 560px));
+}
+/* Phones: the stats/staging column becomes a pull-out panel */
+@media (max-width: 1000px), (max-height: 540px) {
+  .vab {
+    zoom: 0.8;
+  }
+  .vab-stats-toggle {
+    display: inline-flex;
+  }
+  .vab-right {
+    display: none;
+  }
+  .vab.show-right .vab-right {
+    display: flex;
+    z-index: 6;
+    width: 320px;
+  }
+  .vab-left {
+    width: 236px;
+  }
+  .vab-top-actions .btn {
+    padding: 6px 9px;
+  }
+  .vab.touch .vab-hint {
+    max-width: calc(125vw - 360px);
+    left: calc(50% + 118px);
+    bottom: 8px;
+  }
+  .vab-touchbar {
+    left: calc(50% + 118px);
+  }
+}
