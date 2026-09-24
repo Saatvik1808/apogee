@@ -49,9 +49,26 @@ export interface HudActions {
   /** Ask the flight computer to plan a maneuver node; returns a status message. */
   plan(kind: PlanKind): { ok: boolean; message: string };
   deleteNodes(): void;
+  /** Cycle the navigation target through the Moon, Mars and the other vessels of this flight. */
+  cycleTarget(): void;
+  toggleRcs(): void;
+  undock(): void;
+  /** Hand control to the next / previous vessel of this flight. */
+  switchVessel(dir: 1 | -1): void;
 }
 
-export type PlanKind = 'circ-ap' | 'circ-pe' | 'capture' | 'tli' | 'tmi' | 'mcc' | 'tei' | 'deorbit';
+export type PlanKind = 'circ-ap' | 'circ-pe' | 'capture' | 'tli' | 'tmi' | 'mcc' | 'tei' | 'deorbit' | 'intercept' | 'match';
+
+export interface TargetView {
+  name: string;
+  isVessel: boolean;
+  /** Range (m) and relative speed (m/s); NaN for a body target. */
+  distance: number;
+  relSpeed: number;
+  /** Predicted closest approach (m) and seconds until it (NaN if unknown). */
+  caDistance: number;
+  caIn: number;
+}
 
 export interface ObjectiveView {
   text: string;
@@ -65,6 +82,12 @@ export interface HudExtra {
   stageInfo: StageInfo[];
   navballSize: number;
   mapView: boolean;
+  target: TargetView | null;
+  rcs: boolean;
+  /** A module is docked to the active vessel (Undock becomes available). */
+  docked: boolean;
+  /** Controllable vessels in this flight (switching becomes available above one). */
+  vessels: number;
 }
 
 const SAS_MODES: SASMode[] = ['stability', 'maneuver', 'prograde', 'retrograde', 'normal', 'antinormal', 'radial-out', 'radial-in', 'target', 'anti-target'];
@@ -81,6 +104,7 @@ const _dorsal = new Vector3();
 const _nose = new Vector3();
 const _vel = new Vector3();
 const _tgt = new Vector3();
+const _tgtVel = new Vector3();
 const _dir = new Vector3();
 const _proj = { x: 0, y: 0, front: false };
 
@@ -134,6 +158,12 @@ export class FlightHUD {
   private readonly resEl: HTMLDivElement;
   private lastResKey = '';
   private readonly legsBtn: HTMLButtonElement;
+  private readonly rcsBtn: HTMLButtonElement;
+  private readonly undockBtn: HTMLButtonElement;
+  private readonly switchBtn: HTMLButtonElement;
+  // target
+  private readonly tgtName: HTMLSpanElement;
+  private readonly tgtInfo: HTMLSpanElement;
   // autopilot
   private apTab: 'ascent' | 'node' | 'land' = 'ascent';
   private readonly apBody: HTMLDivElement;
@@ -295,13 +325,22 @@ export class FlightHUD {
     // --- resources + autopilot ---
     this.resEl = h('div', { class: 'res' });
     this.legsBtn = h('button', { class: 'btn small', text: 'Legs (G)', onClick: () => actions.toggleLegs() });
+    this.rcsBtn = h('button', { class: 'btn small', text: 'RCS (R)', title: 'Arm the reaction-control thrusters: H/N fore-aft, I/K up-down, J/L left-right', onClick: () => actions.toggleRcs() });
+    this.undockBtn = h('button', { class: 'btn small', text: 'Undock', title: 'Release the docked module', onClick: () => actions.undock() });
+    this.undockBtn.style.display = 'none';
+    this.switchBtn = h('button', { class: 'btn small', text: 'Switch vessel ( ] )', title: 'Control another vessel of this flight', onClick: () => actions.switchVessel(1) });
+    this.switchBtn.style.display = 'none';
     const resCard = h(
       'div',
       { class: 'card pe' },
       h('div', { class: 'card-h' }, h('span', { text: 'Resources' })),
       this.resEl,
-      h('div', { class: 'toggles' }, this.legsBtn),
+      h('div', { class: 'toggles' }, this.legsBtn, this.rcsBtn, this.undockBtn, this.switchBtn),
     );
+    // Navigation target strip (top of the flight computer)
+    this.tgtName = h('span', { class: 'tgt-name', text: 'No target' });
+    this.tgtInfo = h('span', { class: 'tgt-info mono', text: '' });
+    const tgtRow = h('div', { class: 'tgtrow' }, h('button', { class: 'btn small', text: 'Target ▸', title: 'Cycle the target: Moon, Mars, other vessels (map view: click a label)', onClick: () => actions.cycleTarget() }), this.tgtName, this.tgtInfo);
     this.apAlt = h('input', { type: 'number', value: '200' });
     this.apHdg = h('input', { type: 'number', value: '90' });
     this.apBody = h('div');
@@ -321,7 +360,7 @@ export class FlightHUD {
         }),
       );
     }
-    const apCard = h('div', { class: 'card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Flight Computer' }), h('span', { class: 'accent', text: 'AUTO' })), h('div', { class: 'ap' }, tabs, this.apBody, this.apStatus));
+    const apCard = h('div', { class: 'card pe' }, h('div', { class: 'card-h' }, h('span', { text: 'Flight Computer' }), h('span', { class: 'accent', text: 'AUTO' })), tgtRow, h('div', { class: 'ap' }, tabs, this.apBody, this.apStatus));
     this.root.appendChild(h('div', { class: 'rightcol' }, resCard, apCard));
     this.renderAp();
 
@@ -359,9 +398,13 @@ export class FlightHUD {
       ['V', 'Cycle camera (chase / tower / free)'],
       ['Mouse drag / wheel', 'Rotate / zoom camera'],
       ['N (map)', 'Add maneuver node at cursor'],
+      ['Click a label (map)', 'Target that vessel · click again to fly it'],
+      ['[ / ]', 'Switch to the previous / next vessel'],
+      ['R', 'Toggle RCS thrusters'],
+      ['H / N · I / K · J / L', 'RCS translate: forward / back · up / down · left / right'],
       ['P', 'Pause'],
       ['Esc', 'Flight menu'],
-      ['H', 'This help'],
+      ['F1', 'This help'],
       ];
     const tbl = h('table');
     for (const [k, d] of rows) tbl.appendChild(h('tr', {}, h('td', {}, h('kbd', { text: k })), h('td', { text: d })));
@@ -442,6 +485,8 @@ export class FlightHUD {
           b('Fine-tune', 'mcc', 'Mid-course correction for the arrival periapsis'),
           b('Return home', 'tei', 'Trans-Earth injection from lunar orbit'),
           b('De-orbit', 'deorbit', 'Lower the periapsis for re-entry / landing'),
+          b('Intercept', 'intercept', 'Rendezvous step 1: transfer to meet the target vessel (waits for the right phase)'),
+          b('Match velocity', 'match', 'Rendezvous step 2: cancel the relative velocity at closest approach'),
         ),
       );
       this.apBody.appendChild(msg);
@@ -532,7 +577,7 @@ export class FlightHUD {
     _nose.set(0, 1, 0).applyQuaternion(v.q);
     this.navball.setAttitude(_right, _dorsal, _nose, _east, _north, _up);
     const mode = v.controls.speedMode;
-    const vel = mode === 'surface' ? v.surfaceVelocity : mode === 'target' && sim.target ? _vel.copy(v.v).add(v.body.velocity).sub(sim.target.velocity) : v.v;
+    const vel = mode === 'surface' ? v.surfaceVelocity : mode === 'target' && sim.targetVelocity(_tgtVel) ? _vel.copy(v.v).add(v.body.velocity).sub(_tgtVel) : v.v;
     // Markers: every frame, without allocating — each direction is projected in
     // place and its element only touched when its state actually changes
     const shown = this.shownMarkers;
@@ -549,8 +594,8 @@ export class FlightHUD {
       this.placeMarker('radial-out', _r, false, R, shown);
       this.placeMarker('radial-in', _r, true, R, shown);
     }
-    if (sim.target) {
-      _tgt.copy(sim.target.position).sub(v.absolutePosition(_tmp));
+    if (sim.targetPosition(_tgt)) {
+      _tgt.sub(v.absolutePosition(_tmp));
       this.placeMarker('target', _tgt, false, R, shown);
       this.placeMarker('anti-target', _tgt, true, R, shown);
     }
@@ -675,7 +720,7 @@ export class FlightHUD {
     let spd = 0;
     if (mode === 'surface') spd = v.surfaceVelocity.length();
     else if (mode === 'orbit') spd = v.v.length();
-    else if (sim.target) spd = _tmp.copy(v.v).add(v.body.velocity).sub(sim.target.velocity).length();
+    else if (sim.targetVelocity(_tgtVel)) spd = _tmp.copy(v.v).add(v.body.velocity).sub(_tgtVel).length();
     setText(this.speedVal, formatSpeed(spd));
 
     // Heading/pitch/roll
@@ -794,6 +839,26 @@ export class FlightHUD {
     const hasLegs = v.parts.some((p) => !!p.def.legs);
     this.legsBtn.style.display = hasLegs ? '' : 'none';
     this.legsBtn.classList.toggle('active', v.parts.some((p) => p.legsDeployed));
+    const hasRcs = v.parts.some((p) => !!p.def.rcs);
+    this.rcsBtn.style.display = hasRcs ? '' : 'none';
+    this.rcsBtn.classList.toggle('active', extra.rcs);
+    this.undockBtn.style.display = extra.docked ? '' : 'none';
+    this.switchBtn.style.display = extra.vessels > 1 ? '' : 'none';
+
+    // Target
+    const t = extra.target;
+    if (!t) {
+      setText(this.tgtName, 'No target');
+      setText(this.tgtInfo, '');
+    } else {
+      setText(this.tgtName, t.name);
+      let info = '';
+      if (t.isVessel && isFinite(t.distance)) {
+        info = `${formatDistance(t.distance)} · ${t.relSpeed.toFixed(1)} m/s`;
+        if (isFinite(t.caDistance) && isFinite(t.caIn) && t.caIn > 1) info += ` · CA ${formatDistance(t.caDistance)} in ${formatDuration(t.caIn)}`;
+      }
+      setText(this.tgtInfo, info);
+    }
 
     // Autopilot status
     const ap = sim.autopilot;

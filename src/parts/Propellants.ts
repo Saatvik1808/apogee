@@ -17,7 +17,7 @@
  * Key concepts: specific impulse, mixture ratio, bulk density, tank mass fraction
  */
 
-export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'solid';
+export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'monoprop' | 'solid';
 
 export interface PropellantSpec {
   id: PropellantId;
@@ -74,6 +74,16 @@ export const PROPELLANTS: Record<PropellantId, PropellantSpec> = {
     tankMassPerM3: 70,
     costFactor: 2.2,
     color: '#8dff9e',
+    finish: 'gray',
+  },
+  monoprop: {
+    id: 'monoprop',
+    name: 'Hydrazine (Monopropellant)',
+    short: 'Monoprop',
+    density: 1010,
+    tankMassPerM3: 90,
+    costFactor: 2.5,
+    color: '#c8d7ff',
     finish: 'gray',
   },
   solid: {

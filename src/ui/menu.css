@@ -899,3 +899,24 @@
   padding: 12px 22px 16px;
   background: linear-gradient(180deg, rgba(11, 16, 25, 0), var(--panel-solid) 35%);
 }
+
+/* --- tracking station ---------------------------------------------------- */
+.track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(100vh - 160px);
+  max-height: calc(100dvh - 160px);
+  overflow-y: auto;
+}
+.track-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+.track-item .md-actions {
+  margin: 0;
+  flex-shrink: 0;
+}

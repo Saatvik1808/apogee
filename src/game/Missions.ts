@@ -21,6 +21,7 @@
 import { G0 } from '../core/constants';
 import { analyzeStages, totalDv } from '../parts/DeltaV';
 import { CelestialBody, type BodyId } from '../physics/CelestialBody';
+import { Orbit } from '../physics/Orbit';
 import type { FlightSim } from '../sim/FlightSim';
 import type { Vessel } from '../sim/Vessel';
 import type { FlightEvent } from '../sim/VesselPhysics';
@@ -62,9 +63,22 @@ export interface BonusDef {
 /** Local solar time of launch; 'lunar' / 'mars' = computed windows. */
 export type LaunchTimeOfDay = 'dawn' | 'morning' | 'noon' | 'afternoon' | 'dusk' | 'night' | 'lunar' | 'mars';
 
+/** A vessel the mission puts in orbit before launch (unless the tracking station already has it). */
+export interface StationSpawn {
+  /** Tag stored with the persisted vessel; a later mission finds it by this. */
+  tag: string;
+  template: string;
+  name: string;
+  body: BodyId;
+  altKm: number;
+  incDeg: number;
+  /** Angle along the orbit from the ascending node (deg): sets the initial phase relative to the launch. */
+  nuDeg: number;
+}
+
 export interface MissionDef {
   id: string;
-  chapter: 1 | 2 | 3 | 4;
+  chapter: 1 | 2 | 3 | 4 | 5;
   title: string;
   subtitle: string;
   briefing: string;
@@ -77,6 +91,8 @@ export interface MissionDef {
   targetKm?: number;
   objectives: ObjectiveDef[];
   bonus: BonusDef[];
+  /** Target vessel placed in orbit for rendezvous/docking missions. */
+  spawn?: StationSpawn;
   /** Part tier unlocked on completion. */
   unlocksTier: number;
   /** Mission requires a crewed vessel. */
@@ -118,6 +134,26 @@ const safeHome = (c: ObjectiveCtx) => {
 };
 const landedOn = (id: BodyId) => (c: ObjectiveCtx) => c.flags.has(`${id}-landed`);
 const launched = (c: ObjectiveCtx) => !isNaN(c.sim.launchTime);
+/** Within `maxM` metres of the target vessel, closing slower than `maxRel` m/s. */
+const rendezvous = (maxM: number, maxRel: number) => (c: ObjectiveCtx) => {
+  const i = c.sim.targetInfo;
+  return !!i && !!c.sim.targetVessel && i.distance < maxM && i.relSpeed < maxRel;
+};
+const _o = new Orbit();
+/**
+ * At least `n` satellites released by radial separators (their part tree hangs
+ * off the separator that pushed them away), each controllable and in a closed
+ * orbit above `minPeKm`.
+ */
+const constellation = (n: number, minPeKm: number) => (c: ObjectiveCtx) => {
+  let count = 0;
+  for (const v of c.sim.vessels) {
+    if (v.destroyed || v.pinned || v.body.id !== 'earth' || !v.root.def.decoupler?.radial || !v.isControllable) continue;
+    _o.setFromState(v.r, v.v, v.body.mu, c.sim.time);
+    if (_o.isElliptic && _o.periapsis - v.body.radius > minPeKm * 1000) count++;
+  }
+  return count >= n;
+};
 const dvLeft = (min: number): BonusDef => ({ text: `Finish with at least ${min.toLocaleString('en-US')} m/s of Δv to spare`, kind: 'final', check: (s) => s.dvRemaining >= min });
 const gUnder = (g: number, crew: boolean): BonusDef => ({ text: `Keep ${crew ? 'the crew' : 'the vehicle'} below ${g} g`, kind: 'final', check: (s) => s.maxG < g });
 const softer = (mps: number): BonusDef => ({ text: `Touch down slower than ${mps} m/s`, kind: 'final', check: (s) => s.touchdownSpeed < mps });
@@ -286,6 +322,31 @@ export const MISSIONS: MissionDef[] = [
     difficulty: 3,
   },
   {
+    id: 'free-return',
+    chapter: 3,
+    title: 'Slingshot',
+    subtitle: 'A free-return flyby of the Moon',
+    briefing:
+      'Fly around the far side of the Moon and let its gravity throw you back to Earth. From the lunar-window parking orbit plan "To the Moon", then trim with "Fine-tune" until the predicted Earth periapsis after the flyby sits below 100 km. Come home under the parachute.',
+    site: 'cape',
+    template: 'heron',
+    timeOfDay: 'lunar',
+    targetKm: 200,
+    objectives: [
+      { text: 'Enter the sphere of influence of the Moon', check: onBody('moon') },
+      { text: 'Swing back into Earth\'s sphere of influence', check: (c) => c.flags.has('moon-visited') && c.v.body.id === 'earth' },
+      { text: 'Earth periapsis below 100 km after the flyby', check: (c) => c.flags.has('moon-visited') && c.v.body.id === 'earth' && periKm(c) > -100 && periKm(c) < 100 },
+      { text: 'Splash down safely', check: safeHome },
+    ],
+    bonus: [
+      { text: 'Pass within 3,000 km of the Moon', kind: 'latch', check: (_s, c) => c.v.body.id === 'moon' && c.v.altitude < 3_000_000 },
+      gUnder(8, true),
+    ],
+    unlocksTier: 2,
+    crewed: true,
+    difficulty: 4,
+  },
+  {
     id: 'lunar-orbit',
     chapter: 3,
     title: 'Lunar Orbiter',
@@ -432,6 +493,101 @@ export const MISSIONS: MissionDef[] = [
     crewed: false,
     difficulty: 5,
   },
+  // ------------------------------------------------------------ Chapter 5
+  {
+    id: 'relay-net',
+    chapter: 5,
+    title: 'Three Voices',
+    subtitle: 'Deploy a relay constellation',
+    briefing:
+      'One launch, three relay satellites. Reach a parking orbit above 300 km, then release the satellites one at a time with their radial separators (they are not in the automatic staging list) and switch between them with [ and ]. Every vessel you leave in orbit is kept in the tracking station.',
+    site: 'cape',
+    template: 'nimbus-relay',
+    timeOfDay: 'morning',
+    targetKm: 350,
+    objectives: [
+      { text: 'Reach a stable orbit above 300 km', check: orbiting('earth', 300) },
+      { text: 'Three relay satellites free-flying in orbit above 300 km', check: constellation(3, 300) },
+    ],
+    bonus: [
+      { text: 'Release the satellites at least 4 minutes apart', kind: 'latch', check: (_s, c) => c.flags.has('spread-release') },
+      dvLeft(300),
+    ],
+    unlocksTier: 3,
+    crewed: false,
+    difficulty: 3,
+  },
+  {
+    id: 'keystone',
+    chapter: 5,
+    title: 'Keystone',
+    subtitle: 'Put the station core in orbit',
+    briefing:
+      'The Keystone core module has docking ports at both ends, solar wings and RCS. Deliver it to a circular orbit between 380 and 420 km — the rounder the better, because every later rendezvous starts from here. It stays in orbit for the missions that follow.',
+    site: 'cape',
+    template: 'keystone',
+    timeOfDay: 'morning',
+    targetKm: 400,
+    objectives: [
+      { text: 'Reach orbit', check: orbiting('earth', 300) },
+      { text: 'Circular orbit between 380 and 420 km', check: (c) => { const o = orbitAround(c, 'earth'); const R = c.v.body.radius; return !!o && o.periapsis - R > 380_000 && o.apoapsis - R < 420_000; } },
+    ],
+    bonus: [{ text: 'Circular within 5 km (apoapsis − periapsis)', kind: 'latch', check: (_s, c) => circular('earth', 5)(c) }, dvLeft(200)],
+    unlocksTier: 3,
+    crewed: false,
+    difficulty: 2,
+  },
+  {
+    id: 'handshake',
+    chapter: 5,
+    title: 'Handshake',
+    subtitle: 'Rendezvous with Keystone',
+    briefing:
+      'Launch a crew towards Keystone and meet it in orbit. Reach a parking orbit in the station\'s plane, set Keystone as the target, plan an "Intercept" (the planner waits for the right phase, so warp ahead), then "Match velocity" at closest approach. Finish within 200 m at less than 2 m/s relative speed.',
+    site: 'cape',
+    template: 'kestrel-dock',
+    timeOfDay: 'morning',
+    targetKm: 250,
+    heading: 90,
+    objectives: [
+      { text: 'Reach orbit', check: orbiting('earth', 150) },
+      { text: 'Rendezvous: within 200 m of Keystone, under 2 m/s', check: rendezvous(200, 2) },
+    ],
+    bonus: [
+      { text: 'Rendezvous within 6 hours of launch', kind: 'latch', check: (s, c) => rendezvous(200, 2)(c) && s.missionTime < 6 * 3600 },
+      dvLeft(250),
+    ],
+    spawn: { tag: 'keystone', template: 'keystone', name: 'Keystone', body: 'earth', altKm: 400, incDeg: 28.6, nuDeg: 35 },
+    unlocksTier: 3,
+    crewed: true,
+    difficulty: 4,
+  },
+  {
+    id: 'hard-dock',
+    chapter: 5,
+    title: 'Hard Dock',
+    subtitle: 'Dock with Keystone and come home',
+    briefing:
+      'Rendezvous as before, then bring the capsule\'s nose port to one of Keystone\'s ports: target the station, hold the nose on the target marker, and close with RCS at under a metre per second. Docked, you fly the combined stack; undock from the flight computer and bring the crew home.',
+    site: 'cape',
+    template: 'kestrel-dock',
+    timeOfDay: 'morning',
+    targetKm: 250,
+    heading: 90,
+    objectives: [
+      { text: 'Rendezvous with Keystone', check: rendezvous(500, 5) },
+      { text: 'Dock with Keystone', check: (c) => c.flags.has('docked') },
+      { text: 'Undock and return the crew safely to Earth', check: (c) => c.flags.has('docked') && c.flags.has('undocked') && safeHome(c) },
+    ],
+    bonus: [
+      { text: 'Dock within 8 hours of launch', kind: 'latch', check: (s, c) => c.flags.has('docked') && s.missionTime < 8 * 3600 },
+      gUnder(6, true),
+    ],
+    spawn: { tag: 'keystone', template: 'keystone', name: 'Keystone', body: 'earth', altKm: 400, incDeg: 28.6, nuDeg: 35 },
+    unlocksTier: 3,
+    crewed: true,
+    difficulty: 5,
+  },
 ];
 
 export const CHAPTER_OF = (id: string): number => MISSIONS.find((m) => m.id === id)?.chapter ?? 1;
@@ -454,6 +610,7 @@ export class MissionRuntime {
   private finishTimer = -1;
   /** Seconds spent above the crew's survivable sustained g-load. */
   private highG = 0;
+  private lastRadialRelease = NaN;
   readonly stats: MissionStats = { maxG: 0, maxHeat: 0, touchdownSpeed: NaN, landingDistanceKm: NaN, missionTime: 0, dvRemaining: 0 };
   /** Stars earned (1 + bonuses), set on success. */
   stars = 0;
@@ -472,6 +629,14 @@ export class MissionRuntime {
     if (e.vessel !== sim.active) return;
     const v = e.vessel;
     if (e.kind === 'landed') this.flags.add(`${v.body.id}-landed`);
+    if (e.kind === 'docked') this.flags.add('docked');
+    if (e.kind === 'undocked' && this.flags.has('docked')) this.flags.add('undocked');
+    if (e.kind === 'decouple' && e.part?.def.decoupler?.radial) {
+      // Constellation bonus: radial releases spaced ≥ 4 minutes apart
+      if (isFinite(this.lastRadialRelease) && sim.time - this.lastRadialRelease >= 240) this.flags.add('spread-release');
+      else if (isFinite(this.lastRadialRelease)) this.flags.delete('spread-release');
+      this.lastRadialRelease = sim.time;
+    }
     if ((e.kind === 'touchdown' || e.kind === 'splashdown') && e.speed !== undefined) {
       this.stats.touchdownSpeed = e.speed;
       if (v.body.id === 'earth') {
@@ -501,6 +666,7 @@ export class MissionRuntime {
     if (v.maxAltitude > 100_000 && v.body.id === 'earth') this.flags.add('space');
     if (orbiting('earth', 140)(c)) this.flags.add('orbit');
     if (v.body.id === 'sun') this.flags.add('sun');
+    if (v.body.id === 'moon') this.flags.add('moon-visited');
     const p0 = sim.predictor.patches[0];
     // Apoapsis is infinite on an escape trajectory: only a closed orbit counts as "raised"
     if (p0 && sim.predictor.count && v.body.id === 'earth' && p0.orbit.isElliptic && p0.orbit.apoapsis - v.body.radius >= 35_786_000) this.flags.add('geo');

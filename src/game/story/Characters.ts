@@ -14,7 +14,7 @@
  *
  * Key concepts: narrative roles, consistent voice, procedural icons (SVG)
  */
-export type CharacterId = 'director' | 'flight' | 'capcom' | 'engineer' | 'kenji' | 'sofia' | 'news';
+export type CharacterId = 'director' | 'flight' | 'capcom' | 'engineer' | 'kenji' | 'sofia' | 'priya' | 'news';
 
 export interface Character {
   id: CharacterId;
@@ -33,6 +33,7 @@ export const CAST: Record<CharacterId, Character> = {
   engineer: { id: 'engineer', name: 'Dr. Lena Hartmann', role: 'Chief Engineer', color: '#ffd65a', hair: 'crop', headset: false },
   kenji: { id: 'kenji', name: 'Kenji Watanabe', role: 'Commander', color: '#d46bff', hair: 'short', headset: true },
   sofia: { id: 'sofia', name: 'Dr. Sofia Reyes', role: 'Mission Scientist', color: '#ff6bd6', hair: 'long', headset: false },
+  priya: { id: 'priya', name: 'Priya Raman', role: 'Station Commander', color: '#ffa657', hair: 'bun', headset: true },
   news: { id: 'news', name: 'Orbital News', role: 'Broadcast', color: '#93a1b5', hair: 'none', headset: false },
 };
 

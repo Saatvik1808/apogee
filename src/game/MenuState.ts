@@ -17,6 +17,9 @@ import { h, clear } from '../ui/dom';
 import { LAUNCH_SITES } from '../world/LaunchSites';
 import type { GameContext, GameState } from './GameContext';
 import { MISSIONS, type LaunchTimeOfDay, type MissionDef } from './Missions';
+import { ORBIT_STARTS, ORBIT_START_IDS, type OrbitStart } from './OrbitStart';
+import { Orbit } from '../physics/Orbit';
+import { formatDistance } from '../core/math';
 import { buildSettingsPanel } from '../ui/SettingsPanel';
 import { playDialogue } from '../ui/StoryUI';
 import { CHAPTERS, STORY } from './story/Story';
@@ -26,8 +29,12 @@ import { writeSave } from './Save';
 export interface MenuCallbacks {
   onCampaign(m: MissionDef): void;
   onSandbox(): void;
-  onQuickLaunch(templateId: string, siteId: string, tod: LaunchTimeOfDay): void;
+  onQuickLaunch(templateId: string, siteId: string, tod: LaunchTimeOfDay, orbit: OrbitStart): void;
   onMission(m: MissionDef): void;
+  /** Fly a vessel kept in the tracking station. */
+  onResume(pid: string): void;
+  /** Delete a vessel from the tracking station. */
+  onTerminate(pid: string): void;
 }
 
 const _m = new Matrix4();
@@ -42,7 +49,7 @@ export class MenuState implements GameState {
   private readonly camQ = new Quaternion();
   private readonly unbindBack: () => void;
 
-  constructor(ctx: GameContext, focusMission: string | null, cb: MenuCallbacks) {
+  constructor(ctx: GameContext, focusMission: string | null, cb: MenuCallbacks, openPanel: 'tracking' | null = null) {
     this.ctx = ctx;
     this.cb = cb;
     this.panel = h('div', { class: 'menu-panel' });
@@ -54,9 +61,10 @@ export class MenuState implements GameState {
       h('div', { class: 'menu-left' },
         h('div', { class: 'menu-logo' }, h('div', { class: 'logo', text: 'APOGEE' }), h('div', { class: 'tag', text: 'Real-scale space program' })),
         h('div', { class: 'menu-btns' },
-          btn('Campaign', 'Four chapters: from sounding rockets to Mars', () => this.showCampaign(), true),
+          btn('Campaign', 'Five chapters: from sounding rockets to a station in orbit', () => this.showCampaign(), true),
           btn('Sandbox', 'Build anything in the assembly building', () => cb.onSandbox()),
-          btn('Quick launch', 'Fly a reference rocket right now', () => this.showQuick()),
+          btn('Quick launch', 'Fly a reference rocket — from the pad or straight from orbit', () => this.showQuick()),
+          btn('Tracking station', `${ctx.save.campaign.vessels.length} vessel${ctx.save.campaign.vessels.length === 1 ? '' : 's'} in flight`, () => this.showTracking()),
           btn('Settings', 'Graphics presets, controls, audio', () => this.showSettings()),
           btn('Credits', 'Data sources & licences', () => this.showCredits()),
         ),
@@ -73,6 +81,7 @@ export class MenuState implements GameState {
     ctx.audio.setMusicIntensity(1);
     ctx.space.hemi.visible = true;
     if (focusMission) this.showCampaign(focusMission);
+    else if (openPanel === 'tracking') this.showTracking();
     // Start near sunrise over the Pacific
     this.t = 0;
   }
@@ -162,10 +171,43 @@ export class MenuState implements GameState {
     list.querySelector('.mission-item.sel')?.scrollIntoView({ block: 'nearest' });
   }
 
+  /** The tracking station: every vessel left in space or on another world. */
+  private showTracking(): void {
+    const camp = this.ctx.save.campaign;
+    const list = h('div', { class: 'track-list' });
+    if (!camp.vessels.length) {
+      list.appendChild(h('div', { class: 'md-brief', text: 'Nothing in flight yet. Any vessel you leave in orbit — or on the Moon or Mars — when you exit a flight is kept here, and you can fly it again.' }));
+    }
+    for (const s of camp.vessels) {
+      const body = this.ctx.system.get(s.body);
+      let where: string;
+      if (s.pinned) where = `Landed on ${body.name}`;
+      else {
+        const o = new Orbit().setFromState(new Vector3(s.r[0], s.r[1], s.r[2]), new Vector3(s.v[0], s.v[1], s.v[2]), body.mu, s.t);
+        where = o.isElliptic ? `${body.name} orbit · ${formatDistance(o.apoapsis - body.radius)} × ${formatDistance(o.periapsis - body.radius)}` : `Escaping ${body.name}`;
+      }
+      const parts = s.craft.parts.length;
+      list.appendChild(
+        h('div', { class: 'track-item card' },
+          h('div', { class: 'ti-main' },
+            h('div', { class: 'md-title', text: s.name }),
+            h('div', { class: 'md-sub', text: `${where}  ·  ${parts} parts${s.crew ? `  ·  crew ${s.crew}` : ''}${s.mission ? `  ·  ${s.mission}` : ''}` }),
+          ),
+          h('div', { class: 'md-actions' },
+            h('button', { class: 'btn primary small', text: 'Fly', onClick: () => this.cb.onResume(s.pid) }),
+            h('button', { class: 'btn small', text: 'Terminate', onClick: () => this.cb.onTerminate(s.pid) }),
+          ),
+        ),
+      );
+    }
+    this.setPanel('Tracking station', list);
+  }
+
   private showQuick(): void {
     let tpl = TEMPLATES[2]!.id;
     let site = 'cape';
     let tod: LaunchTimeOfDay = 'morning';
+    let orbit: OrbitStart = 'pad';
     const info = h('div', { class: 'quick-info' });
     const renderInfo = () => {
       const t = TEMPLATES.find((x) => x.id === tpl)!;
@@ -208,9 +250,11 @@ export class MenuState implements GameState {
         seg(LAUNCH_SITES.map((s) => [s.id, s.short] as [string, string]), () => site, (v) => (site = v)),
         h('div', { class: 'ql-label', text: 'Local time' }),
         seg([['dawn', 'Dawn'], ['morning', 'Morning'], ['noon', 'Noon'], ['dusk', 'Dusk'], ['night', 'Night'], ['lunar', 'Lunar window'], ['mars', 'Mars window']] as Array<[LaunchTimeOfDay, string]>, () => tod, (v) => (tod = v)),
+        h('div', { class: 'ql-label', text: 'Start' }),
+        seg(ORBIT_START_IDS.map((id) => [id, ORBIT_STARTS[id].label] as [OrbitStart, string]), () => orbit, (v) => (orbit = v)),
         info,
         h('div', { class: 'md-actions' },
-          h('button', { class: 'btn primary', text: 'Go for launch', onClick: () => this.cb.onQuickLaunch(tpl, site, tod) }),
+          h('button', { class: 'btn primary', text: 'Go for launch', onClick: () => this.cb.onQuickLaunch(tpl, site, tod, orbit) }),
         ),
       ),
     );

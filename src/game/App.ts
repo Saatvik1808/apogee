@@ -11,7 +11,8 @@
 import type { Vector3 } from 'three';
 import type { CraftData } from '../parts/Craft';
 import { TEMPLATES } from '../parts/Templates';
-import { utFromDate } from '../physics/Ephemeris';
+import { dateFromUt, utFromDate } from '../physics/Ephemeris';
+import { ORBIT_STARTS, type OrbitStart } from './OrbitStart';
 import { h, clear } from '../ui/dom';
 import { getLaunchSite, type LaunchSite } from '../world/LaunchSites';
 import { FlightState } from './FlightState';
@@ -31,6 +32,10 @@ export interface LaunchRequest {
   site: LaunchSite;
   timeOfDay: LaunchTimeOfDay;
   mission: MissionDef | null;
+  /** Start on the pad, or already in orbit (sandbox). */
+  orbit: OrbitStart;
+  /** Persistent id of a tracking-station vessel to resume (its stored craft and state are used). */
+  resume: string | null;
 }
 
 export class App {
@@ -91,7 +96,9 @@ export class App {
     const quick = q.get('quick');
     const tpl = quick ? TEMPLATES.find((t) => t.id === quick) : undefined;
     if (tpl) {
-      this.launch({ craft: tpl.build(), site: getLaunchSite(q.get('site') ?? 'cape'), timeOfDay: (q.get('tod') as LaunchTimeOfDay) ?? 'morning', mission: null });
+      const orbitParam = q.get('orbit');
+      const orbit: OrbitStart = orbitParam && orbitParam in ORBIT_STARTS ? (orbitParam as OrbitStart) : 'pad';
+      this.launch({ craft: tpl.build(), site: getLaunchSite(q.get('site') ?? 'cape'), timeOfDay: (q.get('tod') as LaunchTimeOfDay) ?? 'morning', mission: null, orbit, resume: null });
     } else if (q.get('vab') !== null) {
       this.openVAB(null, null);
     } else {
@@ -145,20 +152,27 @@ export class App {
     this.hidePause();
   }
 
-  openMenu(focusMission?: string): void {
+  openMenu(focusMission?: string, panel: 'tracking' | null = null): void {
     this.setState(() =>
       new MenuState(this.ctx, focusMission ?? null, {
         onCampaign: (m) => this.openVAB(m, null),
         onSandbox: () => this.openVAB(null, null),
-        onQuickLaunch: (tplId, siteId, tod) => {
+        onQuickLaunch: (tplId, siteId, tod, orbit) => {
           const t = TEMPLATES.find((x) => x.id === tplId)!;
-          this.launch({ craft: t.build(), site: getLaunchSite(siteId), timeOfDay: tod, mission: null });
+          this.launch({ craft: t.build(), site: getLaunchSite(siteId), timeOfDay: tod, mission: null, orbit, resume: null });
         },
         onMission: (m) => {
           const t = TEMPLATES.find((x) => x.id === m.template)!;
-          this.launch({ craft: t.build(), site: getLaunchSite(m.site), timeOfDay: m.timeOfDay, mission: m });
+          this.launch({ craft: t.build(), site: getLaunchSite(m.site), timeOfDay: m.timeOfDay, mission: m, orbit: 'pad', resume: null });
         },
-      }),
+        onResume: (pid) => this.resumeVessel(pid),
+        onTerminate: (pid) => {
+          const camp = this.ctx.save.campaign;
+          camp.vessels = camp.vessels.filter((s) => s.pid !== pid);
+          writeSave(this.ctx.save);
+          this.openMenu(undefined, 'tracking');
+        },
+      }, panel),
     );
   }
 
@@ -167,16 +181,35 @@ export class App {
       new VABState(this.ctx, {
         mission,
         craft,
-        onLaunch: (c, siteId, tod) => this.launch({ craft: c, site: getLaunchSite(siteId), timeOfDay: tod, mission }),
+        onLaunch: (c, siteId, tod) => this.launch({ craft: c, site: getLaunchSite(siteId), timeOfDay: tod, mission, orbit: 'pad', resume: null }),
         onExit: () => this.openMenu(),
       }),
     );
   }
 
+  /** Fly a vessel kept in the tracking station from where it was left. */
+  resumeVessel(pid: string): void {
+    const s = this.ctx.save.campaign.vessels.find((x) => x.pid === pid);
+    if (!s) return;
+    this.launch({ craft: s.craft, site: getLaunchSite('cape'), timeOfDay: 'morning', mission: null, orbit: 'pad', resume: pid });
+  }
+
+  /** Fly the last launch again; the flight being abandoned leaves nothing in the tracking station. */
+  private revert(): void {
+    if (!this.lastLaunch) return;
+    if (this.state instanceof FlightState) this.state.persistOnExit = false;
+    this.launch(this.lastLaunch);
+  }
+
   launch(req: LaunchRequest): void {
     this.lastLaunch = req;
-    const now = new Date(Date.UTC(2026, 8, 24));
+    const camp = this.ctx.save.campaign;
+    // The campaign clock: a new flight never starts before the last one ended, so
+    // satellites left in orbit have moved on by the time you look again
+    const baseUt = Math.max(utFromDate(new Date(Date.UTC(2026, 8, 24))), camp.ut);
+    const now = dateFromUt(baseUt);
     let ut = launchUtFor(now, req.site.lon, req.timeOfDay);
+    if (ut < baseUt) ut += 86400;
     let heading = req.mission?.heading ?? 90;
     let planeNormal: Vector3 | null = null;
     if (req.timeOfDay === 'lunar') {
@@ -192,17 +225,24 @@ export class App {
       heading = w.heading;
       planeNormal = w.normal;
     }
+    const resume = req.resume ? camp.vessels.find((s) => s.pid === req.resume) ?? null : null;
+    // In-orbit starts and resumed flights begin on the campaign clock, not at a launch time of day
+    if (req.orbit !== 'pad' || resume) ut = baseUt + 60;
     const mission = req.mission ? new MissionRuntime(req.mission) : null;
     let fs: FlightState | null = null;
     this.setState(() => {
       fs = new FlightState(this.ctx, {
-        craft: JSON.parse(JSON.stringify(req.craft)) as CraftData,
+        craft: JSON.parse(JSON.stringify(resume ? resume.craft : req.craft)) as CraftData,
         site: req.site,
-        startUt: Number.isFinite(ut) ? ut : utFromDate(now),
+        startUt: Number.isFinite(ut) ? ut : baseUt,
         heading,
         planeNormal,
         targetKm: req.mission?.targetKm ?? 200,
         mission,
+        orbit: req.orbit,
+        resume,
+        others: camp.vessels.filter((s) => !resume || s.pid !== resume.pid),
+        spawn: req.mission?.spawn ?? null,
         onExit: (r) => (r === 'vab' ? this.openVAB(req.mission, req.craft) : this.openMenu()),
       });
       return fs;
@@ -262,7 +302,7 @@ export class App {
         ),
         h('div', { class: 'modal-actions' },
           h('button', { class: 'btn', text: 'Keep flying', onClick: () => this.hidePause() }),
-          h('button', { class: 'btn', text: 'Revert to launch', onClick: () => this.lastLaunch && this.launch(this.lastLaunch) }),
+          h('button', { class: 'btn', text: 'Revert to launch', onClick: () => this.revert() }),
           ok && next
             ? h('button', { class: 'btn primary', text: `Next: ${next.title}`, onClick: () => this.openMenu(next.id) })
             : h('button', { class: 'btn primary', text: 'Main menu', onClick: () => this.openMenu() }),
@@ -306,7 +346,7 @@ export class App {
         h('div', { class: 'modal-actions col' },
           h('button', { class: 'btn primary', text: 'Resume', onClick: () => this.hidePause() }),
           h('button', { class: 'btn', text: 'Settings', onClick: () => this.showPauseSettings(fs) }),
-          h('button', { class: 'btn', text: 'Revert to launch', onClick: () => req && this.launch(req) }),
+          h('button', { class: 'btn', text: 'Revert to launch', onClick: () => this.revert() }),
           h('button', { class: 'btn', text: 'Back to assembly', onClick: () => req && this.openVAB(req.mission, req.craft) }),
           h('button', { class: 'btn', text: 'Main menu', onClick: () => this.openMenu() }),
         ),

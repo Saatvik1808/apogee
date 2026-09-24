@@ -42,6 +42,7 @@ export class RadioDirector {
   private started = false;
   private spaceCalled = false;
   private reentryCalled = false;
+  private rendezvousCalled = false;
   private losPredicted = false;
   private readonly descentFired = new Set<RadioCue>();
 
@@ -84,6 +85,12 @@ export class RadioDirector {
         this.descentFired.add(c);
         this.trigger(t);
       }
+    }
+    // Rendezvous: inside 500 m of a target vessel
+    const ti = sim.targetInfo;
+    if (!this.rendezvousCalled && ti && ti.distance < 500 && sim.targetVessel) {
+      this.rendezvousCalled = true;
+      this.trigger({ on: 'rendezvous' });
     }
     // Re-entry: fast and entering the atmosphere
     const atm = v.body.atmosphere;

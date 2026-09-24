@@ -149,7 +149,7 @@ export function stagesFromCraft(c: CraftData): number[][] {
 
 /** Parts that participate in staging. */
 export function isStageable(l: PartLayout): boolean {
-  return isEngine(l) || !!l.def.decoupler || !!l.def.parachute || !!l.def.fairing;
+  return isEngine(l) || !!l.def.decoupler || !!l.def.parachute || !!l.def.fairing || !!l.def.dock;
 }
 
 /** Ensure every stageable part has a stage and there are no gaps (after manual edits). */

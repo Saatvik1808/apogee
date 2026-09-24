@@ -951,3 +951,22 @@
 .heatout {
   background: radial-gradient(ellipse at center, rgba(255, 120, 40, 0) 30%, rgba(255, 110, 30, 0.55) 75%, rgba(255, 60, 10, 0.85) 100%);
 }
+
+/* --- navigation target strip (flight computer) ------------------------- */
+.hud .tgtrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.hud .tgt-name {
+  color: var(--text);
+  font-family: var(--font-display);
+  letter-spacing: 0.06em;
+}
+.hud .tgt-info {
+  color: var(--text-dim);
+  font-size: 11px;
+}

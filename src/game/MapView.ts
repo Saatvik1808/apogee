@@ -23,8 +23,10 @@ import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { formatDistance, formatDuration } from '../core/math';
 import type { CelestialBody } from '../physics/CelestialBody';
+import { Orbit } from '../physics/Orbit';
 import type { TrajectoryPatch } from '../physics/Trajectory';
 import type { FlightSim } from '../sim/FlightSim';
+import type { Vessel } from '../sim/Vessel';
 import { burnLeadTime, estimateBurnTime, type ManeuverNode } from '../sim/Maneuver';
 import { h, setText, clear } from '../ui/dom';
 import type { GameContext } from './GameContext';
@@ -37,6 +39,7 @@ const _p = new Vector3();
 const _v = new Vector3();
 const _v2 = new Vector3();
 const _scr = new Vector3();
+const _tOrbit = new Orbit();
 
 interface LineSlot {
   line: Line2;
@@ -61,6 +64,8 @@ export class MapView {
   private readonly slots: LineSlot[] = [];
   private readonly nodeSlots: LineSlot[] = [];
   private readonly moonOrbit: LineSlot;
+  /** Orbit of the targeted vessel. */
+  private readonly targetOrbit: LineSlot;
   private readonly overlay: HTMLDivElement;
   private readonly labels = new Map<string, HTMLDivElement>();
   private readonly nodePanel: HTMLDivElement;
@@ -79,6 +84,7 @@ export class MapView {
     for (let i = 0; i < 5; i++) this.slots.push(this.makeSlot(PATCH_COLORS[i]!, false, 2.2));
     for (let i = 0; i < 5; i++) this.nodeSlots.push(this.makeSlot(NODE_COLORS[i]!, true, 1.8));
     this.moonOrbit = this.makeSlot(0x8899aa, false, 1.1);
+    this.targetOrbit = this.makeSlot(0x6ff2a4, false, 1.5);
     this.overlay = h('div', { class: 'ui-layer mapoverlay', style: 'display:none' });
     this.nodeInfo = h('div', { style: 'font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-bottom:6px' });
     const row = (label: string, key: 'prograde' | 'normal' | 'radial', color: string) =>
@@ -162,7 +168,7 @@ export class MapView {
   private allSlots: LineSlot[] | null = null;
 
   private get slotList(): LineSlot[] {
-    if (!this.allSlots) this.allSlots = [...this.slots, ...this.nodeSlots, this.moonOrbit];
+    if (!this.allSlots) this.allSlots = [...this.slots, ...this.nodeSlots, this.moonOrbit, this.targetOrbit];
     return this.allSlots;
   }
 
@@ -386,7 +392,47 @@ export class MapView {
         this.uploadSlot(slot, camAbs);
       } else this.placeSlot(slot, camAbs);
     }
+    // Target vessel's orbit (re-sampled with each prediction — its conic only changes if it burns)
+    const tv = sim.targetVessel;
+    const ts = this.targetOrbit;
+    if (tv && !tv.destroyed && !tv.pinned) {
+      if (ts.stamp !== pred.version || ts.body !== tv.body) {
+        const o = tv.onRails ? tv.railsOrbit : _tOrbit.setFromState(tv.r, tv.v, tv.body.mu, sim.time);
+        ts.body = tv.body;
+        if (o.isElliptic) {
+          for (let i = 0; i < N_SAMPLES; i++) {
+            o.positionAtTrueAnomaly((i / (N_SAMPLES - 1)) * Math.PI * 2, _p);
+            ts.pts[i * 3] = _p.x;
+            ts.pts[i * 3 + 1] = _p.y;
+            ts.pts[i * 3 + 2] = _p.z;
+            ts.times[i] = NaN;
+          }
+          ts.count = N_SAMPLES;
+        } else {
+          for (let i = 0; i < N_SAMPLES; i++) {
+            o.getStateAt(sim.time + ((i / (N_SAMPLES - 1)) * 2 - 0.2) * 3600, _p);
+            ts.pts[i * 3] = _p.x;
+            ts.pts[i * 3 + 1] = _p.y;
+            ts.pts[i * 3 + 2] = _p.z;
+            ts.times[i] = NaN;
+          }
+          ts.count = N_SAMPLES;
+        }
+        ts.stamp = pred.version;
+        this.uploadSlot(ts, camAbs);
+      } else this.placeSlot(ts, camAbs);
+    } else {
+      ts.count = 0;
+      ts.stamp = -1;
+      ts.line.visible = false;
+    }
     this.placeMarkers(camAbs);
+  }
+
+  /** Map-label click on another vessel: first click targets it, a second click flies it. */
+  private pickVessel(ov: Vessel): void {
+    if (this.sim.target === ov) this.sim.setActive(ov);
+    else this.sim.target = ov;
   }
 
   private label(key: string, text: string, cls: string, world: Vector3 | null, camAbs: Vector3, onClick?: () => void): void {
@@ -429,6 +475,11 @@ export class MapView {
     }
     const v = sim.active;
     this.label('vessel', `▲ ${v.name}`, 'vessel', v.absolutePosition(_v), camAbs);
+    for (const ov of sim.vessels) {
+      if (ov === v || ov.destroyed || ov.debris) continue;
+      const tag = sim.target === ov ? `◎ ${ov.name}` : `△ ${ov.name}`;
+      this.label(`vessel-${ov.id}`, tag, 'other', ov.absolutePosition(_v), camAbs, () => this.pickVessel(ov));
+    }
     const pred = sim.predictor;
     const patchLabels = (pp: TrajectoryPatch, prefix: string, idx: number, color: string) => {
       const o = pp.orbit;
@@ -476,7 +527,7 @@ export class MapView {
         el.remove();
         this.labels.delete(k);
       } else {
-        el.style.color = k.startsWith('body') ? '#e8eef7' : k.includes('pe') ? '#6ff2a4' : k.includes('ap') ? '#5ad8ff' : k.startsWith('node') ? '#fff1a8' : k.includes('imp') ? '#ff6b6b' : k === 'vessel' ? '#ffb13b' : '#ffd27a';
+        el.style.color = k.startsWith('vessel-') ? (el.textContent?.startsWith('◎') ? '#6ff2a4' : '#93a1b5') : k.startsWith('body') ? '#e8eef7' : k.includes('pe') ? '#6ff2a4' : k.includes('ap') ? '#5ad8ff' : k.startsWith('node') ? '#fff1a8' : k.includes('imp') ? '#ff6b6b' : k === 'vessel' ? '#ffb13b' : '#ffd27a';
       }
     }
   }

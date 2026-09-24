@@ -95,3 +95,13 @@ export const CAMERA_NEAR = 0.05;
 export const CAMERA_FAR = 1e13;
 /** Physics bubble: debris beyond this distance from the active vessel is dropped. */
 export const PHYSICS_BUBBLE_RADIUS = 25_000;
+
+// --- Docking -------------------------------------------------------------------
+/** Two docking faces closer than this (m) can latch. */
+export const DOCK_CAPTURE_DISTANCE = 0.45;
+/** Closing speed above which the ports bounce off instead of latching (m/s). */
+export const DOCK_MAX_SPEED = 1.2;
+/** Maximum misalignment between the two docking axes (rad). */
+export const DOCK_MAX_ANGLE = (15 * Math.PI) / 180;
+/** Spring push when a port releases (m/s, shared by mass between the two vessels). */
+export const DOCK_SEPARATION_DV = 0.3;

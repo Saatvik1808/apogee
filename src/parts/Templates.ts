@@ -40,6 +40,16 @@ export interface CraftTemplate {
   build: () => CraftData;
 }
 
+/** Keystone station core (root ring, nose port, hull with wings and RCS, tail port). Returns the tail port's uid. */
+function keystoneCore(b: CraftBuilder): number {
+  const core = b.root('ring-atlas', { diameter: 2.5 });
+  b.above(core, 'docking-port', { diameter: 1.25 });
+  const hull = b.below(core, 'tank-250', { length: 3, propellant: 'hypergolic' });
+  b.radial(hull, 'solar-panel', 4, 0.6, 0);
+  b.radial(hull, 'rcs-quad', 4, -1.1, Math.PI / 4);
+  return b.below(hull, 'docking-port', { diameter: 1.25 });
+}
+
 export const TEMPLATES: CraftTemplate[] = [
   {
     id: 'pathfinder',
@@ -128,6 +138,88 @@ export const TEMPLATES: CraftTemplate[] = [
       const ke = b.below(kt, 'eng-rotor-vac', { cluster: 1 });
       const dec2 = b.below(ke, 'decoupler-stack', { diameter: 1.25 });
       const ad = b.below(dec2, 'adapter', { diameter: 1.25, diameterBottom: 3.75 });
+      const t2 = b.below(ad, 'tank-375', { length: 10.5, propellant: 'kerolox' });
+      const e2 = b.below(t2, 'eng-hawk-vac', { cluster: 1 });
+      const dec1 = b.below(e2, 'decoupler-stack', { diameter: 3.75 });
+      const t1 = b.below(dec1, 'tank-375', { length: 39, propellant: 'kerolox' });
+      b.below(t1, 'eng-hawk', { cluster: 9 });
+      return applyAutoStagingSafe(b.craft);
+    },
+  },
+  {
+    id: 'nimbus-relay',
+    name: 'Heron 9 · Relay Trio',
+    tagline: 'Three relay satellites on radial separators. Release them one by one into their own orbits.',
+    build: () => {
+      const b = new CraftBuilder('Heron 9 Relay Trio', 'Dispenser stage with three Sentinel relay satellites on radial separators, launched by a Heron 9 with a Rotor-1 Vac kick stage.');
+      const core = b.root('probe-sentinel');
+      b.above(core, 'nosecone', { diameter: 1.25 });
+      const bus = b.below(core, 'tube', { diameter: 1.25, length: 2.2 });
+      const seps = b.radial(bus, 'decoupler-radial', 3, 0, 0);
+      for (const s of seps) {
+        const sat = b.radial(s, 'probe-sentinel', 1, 0, 0)[0]!;
+        b.radial(sat, 'solar-panel', 2, 0, Math.PI / 2);
+      }
+      const kt = b.below(bus, 'tank-125', { length: 1.5, propellant: 'kerolox' });
+      const ke = b.below(kt, 'eng-rotor-vac', { cluster: 1 });
+      const dec2 = b.below(ke, 'decoupler-stack', { diameter: 1.25 });
+      const ad = b.below(dec2, 'adapter', { diameter: 1.25, diameterBottom: 3.75 });
+      const t2 = b.below(ad, 'tank-375', { length: 10.5, propellant: 'kerolox' });
+      const e2 = b.below(t2, 'eng-hawk-vac', { cluster: 1 });
+      const dec1 = b.below(e2, 'decoupler-stack', { diameter: 3.75 });
+      const t1 = b.below(dec1, 'tank-375', { length: 39, propellant: 'kerolox' });
+      b.below(t1, 'eng-hawk', { cluster: 9 });
+      const craft = applyAutoStagingSafe(b.craft);
+      // The satellites are released by hand (staging them all at once would scatter them together)
+      for (const p of craft.parts) if (p.defId === 'decoupler-radial') p.stage = -1;
+      craft.manualStaging = true;
+      return craft;
+    },
+  },
+  {
+    id: 'keystone-core',
+    name: 'Keystone station core',
+    tagline: 'The station module alone — start it in orbit to practise docking with it.',
+    build: () => {
+      const b = new CraftBuilder('Keystone', 'Keystone station core: Atlas guidance ring, two docking ports, solar arrays and RCS.');
+      keystoneCore(b);
+      return applyAutoStagingSafe(b.craft);
+    },
+  },
+  {
+    id: 'keystone',
+    name: 'Heron 9 · Keystone',
+    tagline: 'Station core module: docking ports at both ends, solar wings and RCS. Leave it in orbit for later visits.',
+    build: () => {
+      const b = new CraftBuilder('Heron 9 Keystone', 'Keystone station core — Atlas guidance ring, two docking ports, solar arrays and RCS — on a Heron 9.');
+      const bottomPort = keystoneCore(b);
+      const dec2 = b.below(bottomPort, 'decoupler-stack', { diameter: 2.5 });
+      const ad = b.below(dec2, 'adapter', { diameter: 2.5, diameterBottom: 3.75 });
+      const t2 = b.below(ad, 'tank-375', { length: 10.5, propellant: 'kerolox' });
+      const e2 = b.below(t2, 'eng-hawk-vac', { cluster: 1 });
+      const dec1 = b.below(e2, 'decoupler-stack', { diameter: 3.75 });
+      const t1 = b.below(dec1, 'tank-375', { length: 39, propellant: 'kerolox' });
+      b.below(t1, 'eng-hawk', { cluster: 9 });
+      return applyAutoStagingSafe(b.craft);
+    },
+  },
+  {
+    id: 'kestrel-dock',
+    name: 'Heron 9 · Kestrel Dock',
+    tagline: 'Two-seat capsule with a nose docking port, RCS quads and radial parachutes. Built for rendezvous.',
+    build: () => {
+      const b = new CraftBuilder('Heron 9 Kestrel Dock', 'Kestrel capsule fitted with a docking port, four RCS quads and side-mounted parachutes, on a Heron 9.');
+      const cap = b.root('capsule-kestrel');
+      b.above(cap, 'docking-port', { diameter: 1.25 });
+      b.radial(cap, 'chute-radial', 2, -0.3, 0);
+      const hs = b.below(cap, 'heatshield', { diameter: 2.5 });
+      const decSM = b.below(hs, 'decoupler-stack', { diameter: 2.5 });
+      const sm = b.below(decSM, 'tank-250', { length: 0.75, propellant: 'hypergolic' });
+      b.radial(sm, 'solar-panel', 2, 0, Math.PI / 2);
+      b.radial(sm, 'rcs-quad', 4, 0.1, Math.PI / 4);
+      const smEng = b.below(sm, 'eng-kestrel-sps', { cluster: 1 });
+      const dec2 = b.below(smEng, 'decoupler-stack', { diameter: 2.5 });
+      const ad = b.below(dec2, 'adapter', { diameter: 2.5, diameterBottom: 3.75 });
       const t2 = b.below(ad, 'tank-375', { length: 10.5, propellant: 'kerolox' });
       const e2 = b.below(t2, 'eng-hawk-vac', { cluster: 1 });
       const dec1 = b.below(e2, 'decoupler-stack', { diameter: 3.75 });

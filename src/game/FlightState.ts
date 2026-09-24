@@ -15,21 +15,25 @@
  * handling, floating origin
  */
 import { Matrix4, Quaternion, Vector3 } from 'three';
-import { AERO_BREAKUP_LOAD, G0 } from '../core/constants';
+import { AERO_BREAKUP_LOAD, DEG, G0, RAD } from '../core/constants';
 import { clamp } from '../core/math';
 import type { CraftData } from '../parts/Craft';
 import { analyzeStages, type StageInfo } from '../parts/DeltaV';
+import { TEMPLATES } from '../parts/Templates';
 import { CelestialBody } from '../physics/CelestialBody';
+import { Orbit } from '../physics/Orbit';
+import { snapshotVessel, vesselFromSnapshot, type VesselSnapshot } from '../sim/Snapshot';
+import { ORBIT_STARTS, type OrbitStart } from './OrbitStart';
 import { FlightEffects } from '../render/fx/FlightEffects';
 import { LaunchPad } from '../render/LaunchPad';
 import { buildFairingHalf } from '../render/vessel/PartMeshes';
 import { VesselView } from '../render/vessel/VesselView';
 import { FlightSim } from '../sim/FlightSim';
 import { burnLeadTime } from '../sim/Maneuver';
-import type { Vessel, SASMode } from '../sim/Vessel';
+import { Vessel, type SASMode } from '../sim/Vessel';
 import type { FlightEvent } from '../sim/VesselPhysics';
-import { planCapture, planCircularize, planCorrection, planDeorbit, planMarsTransfer, planMoonTransfer, planReturnToEarth, type PlanResult } from '../sim/Planner';
-import { FlightHUD, type HudActions, type ObjectiveView, type PlanKind } from '../ui/FlightHUD';
+import { planCapture, planCircularize, planCorrection, planDeorbit, planIntercept, planMarsTransfer, planMatchVelocity, planMoonTransfer, planReturnToEarth, type PlanResult } from '../sim/Planner';
+import { FlightHUD, type HudActions, type ObjectiveView, type PlanKind, type TargetView } from '../ui/FlightHUD';
 import { Navball } from '../ui/Navball';
 import { TouchControls } from '../ui/TouchControls';
 import { RadioFeed } from '../ui/StoryUI';
@@ -40,7 +44,7 @@ import { FlightCamera, MapCamera } from './FlightCamera';
 import type { GameContext, GameState } from './GameContext';
 import { MapView } from './MapView';
 import type { Mesh } from 'three';
-import type { MissionRuntime } from './Missions';
+import type { MissionRuntime, StationSpawn } from './Missions';
 import { writeSave } from './Save';
 
 export interface FlightParams {
@@ -54,10 +58,29 @@ export interface FlightParams {
   /** Orbital plane to follow during ascent (launch windows), or null for a plain heading. */
   planeNormal: Vector3 | null;
   mission: MissionRuntime | null;
+  /** Start on the pad or already in orbit (sandbox). */
+  orbit: OrbitStart;
+  /** A tracking-station vessel to fly instead of a fresh craft. */
+  resume: VesselSnapshot | null;
+  /** Every other vessel kept in the tracking station (loaded into this flight). */
+  others: VesselSnapshot[];
+  /** Station a mission places in orbit (unless the tracking station already has it). */
+  spawn: StationSpawn | null;
   onExit: (reason: 'vab' | 'menu' | 'revert') => void;
 }
 
 const _abs = new Vector3();
+const _prop = new Orbit();
+
+/** Carry a restored vessel forward from its saved time to now along its orbit. */
+function propagateSnapshot(v: Vessel, s: VesselSnapshot, t: number): void {
+  if (v.pinned || t <= s.t) return;
+  _prop.setFromState(v.r, v.v, v.body.mu, s.t).getStateAt(t, v.r, v.v);
+}
+
+function newPid(): string {
+  return `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
 const _q = new Quaternion();
 const _origin = new Vector3();
 const _tmp = new Vector3();
@@ -100,6 +123,10 @@ export class FlightState implements GameState {
   private countdown = -1;
   private readonly mission: MissionRuntime | null;
   private shakeLevel = 0;
+  /** Save the vessels of this flight to the tracking station on exit (false when reverting). */
+  persistOnExit = true;
+  /** Tracking-station ids loaded into this flight (dropped from the save if they no longer exist). */
+  private readonly loadedPids = new Set<string>();
 
   constructor(ctx: GameContext, params: FlightParams) {
     this.ctx = ctx;
@@ -107,11 +134,38 @@ export class FlightState implements GameState {
     this.mission = params.mission;
     ctx.system.update(params.startUt);
     this.sim = new FlightSim(ctx.system, params.craft, params.site, params.startUt);
-    const v = this.sim.active;
+    let v = this.sim.active;
     const scene = ctx.space.scene;
+    const inSpace = params.orbit !== 'pad' || !!params.resume;
+    if (params.resume) {
+      // Resume a vessel from the tracking station where (and when) it was left
+      const snap = params.resume;
+      const nv = vesselFromSnapshot(snap, ctx.system.get(snap.body));
+      propagateSnapshot(nv, snap, params.startUt);
+      this.sim.replaceActive(nv);
+      v = nv;
+      this.loadedPids.add(snap.pid);
+    } else if (params.orbit !== 'pad') {
+      const spec = ORBIT_STARTS[params.orbit];
+      this.sim.placeInOrbit(v, ctx.system.get(spec.body), spec.altKm * 1000, spec.incDeg);
+    }
+    if (inSpace) this.sim.launchTime = params.startUt;
+    // Everything earlier flights left in space rides along (on rails until it comes close)
+    for (const s of params.others) {
+      if (params.resume && s.pid === params.resume.pid) continue;
+      const ov = vesselFromSnapshot(s, ctx.system.get(s.body));
+      propagateSnapshot(ov, s, params.startUt);
+      if (!ov.pinned) {
+        ov.railsOrbit.setFromState(ov.r, ov.v, ov.body.mu, params.startUt);
+        ov.onRails = true;
+      }
+      this.loadedPids.add(s.pid);
+      this.sim.addVessel(ov);
+    }
+    this.spawnStation(params);
 
     // Launch pad attached to the rotating Earth
-    const terrain = ctx.space.terrainFor(params.site.body);
+    const terrain = inSpace ? undefined : ctx.space.terrainFor(params.site.body);
     if (terrain) {
       const len = v.length;
       const radius = Math.max(1, v.refRadius);
@@ -185,6 +239,10 @@ export class FlightState implements GameState {
         this.sim.autopilot.disengage('Autopilot off');
         this.sim.active.controls.throttle = 0;
       },
+      cycleTarget: () => this.cycleTarget(),
+      toggleRcs: () => this.toggleRcs(),
+      undock: () => this.undockActive(),
+      switchVessel: (d) => this.switchVessel(d),
     };
     this.hud = new FlightHUD(ctx.ui, actions, this.navball, ctx.platform.touch);
     this.hudTouch = ctx.platform.touch;
@@ -214,10 +272,18 @@ export class FlightState implements GameState {
     this.sim.autopilot.ascent.heading = params.heading;
     this.hud.setAscentDefaults(params.targetKm, params.heading);
     this.unbindKey = ctx.input.onKey((code) => this.onKey(code));
-    this.hud.logEvent(0, `${v.name} on the pad at ${params.site.name}`);
-    const wx = this.sim.physics.wind?.report;
-    if (wx) this.hud.logEvent(0, `Weather: surface wind ${wx.surfaceSpeed.toFixed(0)} m/s from ${wx.surfaceFrom.toFixed(0).padStart(3, '0')}°, jet stream ${wx.jetSpeed.toFixed(0)} m/s at ${(wx.jetAltitude / 1000).toFixed(1)} km`, wx.jetSpeed > 50 ? 'warn' : 'info');
-    this.hud.showToast(params.site.short, ctx.platform.touch ? 'Tap STAGE to launch' : 'Press SPACE to launch · H for controls', 5);
+    if (inSpace) {
+      this.camera.mode = 'chase';
+      this.hud.logEvent(0, `${v.name} in flight around ${v.body.name}`);
+      this.hud.showToast(v.name, ctx.platform.touch ? 'Flying from orbit' : 'Flying from orbit · F1 for controls', 5);
+    } else {
+      this.hud.logEvent(0, `${v.name} on the pad at ${params.site.name}`);
+      const wx = this.sim.physics.wind?.report;
+      if (wx) this.hud.logEvent(0, `Weather: surface wind ${wx.surfaceSpeed.toFixed(0)} m/s from ${wx.surfaceFrom.toFixed(0).padStart(3, '0')}°, jet stream ${wx.jetSpeed.toFixed(0)} m/s at ${(wx.jetAltitude / 1000).toFixed(1)} km`, wx.jetSpeed > 50 ? 'warn' : 'info');
+      this.hud.showToast(params.site.short, ctx.platform.touch ? 'Tap STAGE to launch' : 'Press SPACE to launch · F1 for controls', 5);
+    }
+    const others = this.sim.vessels.length - 1;
+    if (others > 0) this.hud.logEvent(0, `${others} other vessel${others === 1 ? '' : 's'} in this flight — map view: click a label to target it`);
     ctx.audio.setMusicIntensity(0.6);
     this.refreshStageInfo();
     if (this.mission) this.mission.start(this.sim);
@@ -227,6 +293,118 @@ export class FlightState implements GameState {
     const view = new VesselView(v);
     this.views.set(v.id, view);
     this.ctx.space.scene.add(view.group);
+  }
+
+  /**
+   * Put a mission's station in orbit unless an earlier flight already left it
+   * there. It goes into the launch site's orbital plane: a due-east launch
+   * reaches the apex of an orbit inclined at the site's latitude, whose
+   * ascending node lies 90° of longitude west of the pad — evaluated for the pad
+   * ~10 minutes after liftoff, when the ascent reaches orbit.
+   */
+  private spawnStation(params: FlightParams): void {
+    const spawn = params.spawn;
+    if (!spawn) return;
+    const sim = this.sim;
+    const existing = sim.vessels.find((x) => x.missionTag === spawn.tag && x !== sim.active);
+    if (existing) {
+      sim.target = existing;
+      return;
+    }
+    const tpl = TEMPLATES.find((t) => t.id === spawn.template);
+    if (!tpl) return;
+    const body = this.ctx.system.get(spawn.body);
+    const sv = Vessel.fromCraft(tpl.build(), body);
+    sv.name = spawn.name;
+    sv.missionTag = spawn.tag;
+    this.ctx.system.update(params.startUt + 600);
+    const siteDir = CelestialBody.dirFromLatLon(params.site.lat * DEG, params.site.lon * DEG, _tmp).applyQuaternion(body.rotation);
+    this.ctx.system.update(params.startUt);
+    const lonI = Math.atan2(-siteDir.z, siteDir.x) * RAD;
+    sim.placeInOrbit(sv, body, spawn.altKm * 1000, Math.max(spawn.incDeg, Math.abs(params.site.lat)), lonI - 90, 90 + spawn.nuDeg);
+    sv.railsOrbit.setFromState(sv.r, sv.v, body.mu, params.startUt);
+    sv.onRails = true;
+    for (const p of sv.parts) if (p.def.shape === 'solar') p.solarDeploy = 1;
+    sim.addVessel(sv);
+    sim.target = sv;
+  }
+
+  private cycleTarget(): void {
+    const sim = this.sim;
+    const sys = this.ctx.system;
+    const options: Array<CelestialBody | Vessel | null> = [null, sys.moon, sys.mars];
+    for (const x of sim.vessels) if (x !== sim.active && !x.destroyed && !x.debris) options.push(x);
+    const i = options.indexOf(sim.target);
+    sim.target = options[(i + 1) % options.length] ?? null;
+    this.hud.showToast(sim.target ? `Target: ${sim.target.name}` : 'Target cleared', '', 1.5);
+    this.ctx.audio.click();
+  }
+
+  private toggleRcs(): void {
+    const v = this.sim.active;
+    if (!v.parts.some((p) => !!p.def.rcs)) {
+      this.hud.showToast('No RCS thrusters', 'Add RCS quads in the assembly building', 2.5);
+      return;
+    }
+    v.controls.rcs = !v.controls.rcs;
+    this.hud.showToast(v.controls.rcs ? 'RCS armed' : 'RCS off', v.controls.rcs ? 'H/N fore-aft · I/K up-down · J/L left-right' : '', 2);
+    this.ctx.audio.click();
+  }
+
+  private undockActive(): void {
+    const ports = this.sim.dockedPorts();
+    if (!ports.length) return;
+    this.sim.undock(ports[0]!);
+    this.refreshStageInfo();
+  }
+
+  private switchVessel(dir: 1 | -1): void {
+    const nv = this.sim.cycleActive(dir);
+    if (!nv) this.hud.showToast('No other vessel to fly', '', 1.5);
+  }
+
+  private targetView(): TargetView | null {
+    const sim = this.sim;
+    const t = sim.target;
+    if (!t) return null;
+    const info = sim.targetInfo;
+    return {
+      name: t.name,
+      isVessel: !!sim.targetVessel,
+      distance: info ? info.distance : NaN,
+      relSpeed: info ? info.relSpeed : NaN,
+      caDistance: info ? info.caDistance : NaN,
+      caIn: info ? info.caTime - sim.time : NaN,
+    };
+  }
+
+  /**
+   * Leave this flight's spacecraft in the tracking station: anything in a stable
+   * orbit (or resting on another world) is saved with its full state, and
+   * vessels loaded from the station that no longer exist — docked into another,
+   * lost, or brought home — are dropped from it. The campaign clock moves on.
+   */
+  private persistVessels(): void {
+    const save = this.ctx.save;
+    const camp = save.campaign;
+    const sim = this.sim;
+    const keep = new Map(camp.vessels.map((s) => [s.pid, s] as const));
+    const live = new Set<string>();
+    for (const v of sim.vessels) {
+      if (v.destroyed || v.debris || !v.isControllable) continue;
+      const inSpace = !v.pinned && (v.situation === 'orbiting' || v.situation === 'escaping' || (v.body.id !== 'earth' && !v.inAtmosphere && v.situation !== 'landed'));
+      const onWorld = v.pinned && v.body.id !== 'earth' && (v.situation === 'landed' || v.situation === 'splashed');
+      if (!inSpace && !onWorld) continue;
+      const pid = v.pid ?? newPid();
+      v.pid = pid;
+      live.add(pid);
+      const mission = v.missionTag ?? (v === sim.active && this.mission ? this.mission.def.id : null);
+      keep.set(pid, snapshotVessel(v, sim.time, pid, mission));
+    }
+    for (const pid of this.loadedPids) if (!live.has(pid)) keep.delete(pid);
+    camp.vessels = [...keep.values()];
+    camp.ut = Math.max(camp.ut, sim.time);
+    writeSave(save);
   }
 
   // ---------------------------------------------------------------------------
@@ -245,6 +423,8 @@ export class FlightState implements GameState {
       mcc: () => planCorrection(sim, this.marsTargetAlt()),
       tei: () => planReturnToEarth(sim),
       deorbit: () => planDeorbit(sim),
+      intercept: () => planIntercept(sim),
+      match: () => planMatchVelocity(sim),
     };
     const r = planners[kind]();
     if (r.ok) {
@@ -387,9 +567,17 @@ export class FlightState implements GameState {
       case 'KeyP':
         this.sim.paused = !this.sim.paused;
         break;
-      case 'KeyH':
       case 'F1':
         this.hud.toggleHelp();
+        break;
+      case 'BracketRight':
+        this.switchVessel(1);
+        break;
+      case 'BracketLeft':
+        this.switchVessel(-1);
+        break;
+      case 'KeyR':
+        this.toggleRcs();
         break;
       case 'F2':
         // Screenshot mode: hide every overlay
@@ -425,6 +613,16 @@ export class FlightState implements GameState {
     }
     if (inp.isDown('ShiftLeft') || inp.isDown('ShiftRight')) c.throttle = clamp(c.throttle + dt * 0.7, 0, 1);
     if (inp.isDown('ControlLeft') || inp.isDown('ControlRight')) c.throttle = clamp(c.throttle - dt * 0.7, 0, 1);
+    // RCS translation in the vessel frame: H/N fore-aft, I/K up-down, J/L left-right
+    if (c.rcs && !this.mapMode) {
+      c.ty = (inp.isDown('KeyH') ? 1 : 0) - (inp.isDown('KeyN') ? 1 : 0);
+      c.tz = (inp.isDown('KeyI') ? 1 : 0) - (inp.isDown('KeyK') ? 1 : 0);
+      c.tx = (inp.isDown('KeyL') ? 1 : 0) - (inp.isDown('KeyJ') ? 1 : 0);
+    } else {
+      c.tx = 0;
+      c.ty = 0;
+      c.tz = 0;
+    }
     // Any manual steering or throttle input overrides the autopilot
     if (ap.mode !== 'off' && (c.pitch !== 0 || c.yaw !== 0 || c.roll !== 0)) ap.disengage('Manual override');
     // Auto speed mode (surface near the ground, orbit higher up)
@@ -556,6 +754,10 @@ export class FlightState implements GameState {
         stageInfo: this.stageInfo,
         navballSize: this.navballSize(),
         mapView: this.mapMode,
+        target: this.targetView(),
+        rcs: v.controls.rcs,
+        docked: sim.dockedPorts().length > 0,
+        vessels: sim.vessels.reduce((n, x) => n + (!x.destroyed && !x.debris && x.isControllable ? 1 : 0), 0),
       },
       realDt,
     );
@@ -811,6 +1013,34 @@ export class FlightState implements GameState {
       case 'no-ignitions':
         if (active) this.hud.logEvent(met, e.message, 'bad');
         break;
+      case 'docked':
+        if (active) {
+          this.hud.showToast('Hard dock', e.message, 4);
+          this.hud.logEvent(met, e.message, 'good');
+          this.ctx.audio.thud();
+          this.camera.kick(0.3);
+          this.ctx.platform.haptic('medium');
+          this.radio.trigger({ on: 'docked' });
+          this.refreshStageInfo();
+        }
+        break;
+      case 'undocked':
+        if (active) {
+          this.hud.showToast('Undocked', e.message, 3);
+          this.hud.logEvent(met, e.message);
+          this.ctx.audio.stageSep(false);
+          this.radio.trigger({ on: 'undocked' });
+          this.refreshStageInfo();
+        }
+        break;
+      case 'switch':
+        this.hud.showToast('Now flying', e.vessel.name, 2.5);
+        this.hud.logEvent(met, e.message);
+        this.camera.targetDistance = Math.max(12, e.vessel.length * 1.6);
+        this.camera.minDistance = Math.max(2, e.vessel.boundingRadius * 0.6);
+        this.refreshStageInfo();
+        this.ctx.audio.click();
+        break;
       default:
         break;
     }
@@ -972,6 +1202,7 @@ export class FlightState implements GameState {
   }
 
   dispose(): void {
+    if (this.persistOnExit) this.persistVessels();
     // "Keep flying" after success can still earn bonus stars; and a flight left
     // within seconds of success (before the debrief appeared) still counts as done
     const m = this.mission;

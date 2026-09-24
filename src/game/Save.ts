@@ -9,6 +9,7 @@
  * Key concepts: serialisation, schema versioning, defensive I/O
  */
 import type { CraftData } from '../parts/Craft';
+import type { VesselSnapshot } from '../sim/Snapshot';
 
 export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra';
 export type Level3 = 'low' | 'medium' | 'high';
@@ -44,6 +45,10 @@ export interface Settings {
 }
 
 export interface CampaignProgress {
+  /** Universal time of the campaign clock (s since J2000); new flights start no earlier. */
+  ut: number;
+  /** Vessels left in space or on other worlds between flights — the tracking station. */
+  vessels: VesselSnapshot[];
   completed: string[];
   /** Best star rating (1–3) per mission id. */
   scores: Record<string, number>;
@@ -66,7 +71,7 @@ export function defaultSave(): SaveData {
   return {
     version: 1,
     crafts: [],
-    campaign: { completed: [], scores: {}, funds: 0, storySeen: [] },
+    campaign: { ut: 0, vessels: [], completed: [], scores: {}, funds: 0, storySeen: [] },
     settings: {
       quality: 'high',
       renderScale: 1.5,
@@ -108,10 +113,14 @@ export function loadSave(): SaveData {
     if (!raw) return defaultSave();
     const d = JSON.parse(raw) as Partial<SaveData>;
     const base = defaultSave();
+    // Older saves predate the tracking station: fill in its fields
+    const campaign = { ...base.campaign, ...(d.campaign ?? {}) };
+    if (!Array.isArray(campaign.vessels)) campaign.vessels = [];
+    if (typeof campaign.ut !== 'number' || !isFinite(campaign.ut)) campaign.ut = 0;
     return {
       version: 1,
       crafts: Array.isArray(d.crafts) ? d.crafts : [],
-      campaign: { ...base.campaign, ...(d.campaign ?? {}) },
+      campaign,
       settings: { ...base.settings, ...(d.settings ?? {}) },
       lastCraft: d.lastCraft ?? null,
     };

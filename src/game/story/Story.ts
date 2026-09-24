@@ -40,7 +40,10 @@ export type RadioTrigger =
   | { on: 'los' }
   | { on: 'aos' }
   | { on: 'descending'; km: number; body: BodyId }
-  | { on: 'highg' };
+  | { on: 'highg' }
+  | { on: 'rendezvous' }
+  | { on: 'docked' }
+  | { on: 'undocked' };
 
 export interface RadioCue {
   trigger: RadioTrigger;
@@ -101,6 +104,16 @@ export const CHAPTERS: Chapter[] = [
       { who: 'engineer', text: 'Earth and Mars line up for a cheap transfer only once per synodic period. Leave early or late and the fuel bill explodes.' },
     ],
   },
+  {
+    n: 5,
+    title: 'Orbital Operations',
+    tagline: 'A permanent presence: constellations, a station, rendezvous and docking.',
+    intro: [
+      { who: 'director', text: 'Flags and footprints are done. The board wants infrastructure now: a relay network, a station, and crews that can find each other in orbit.' },
+      { who: 'priya', text: 'Priya Raman. I\'ll command Keystone once it flies. Docking is the hardest thing a pilot does up there — two vehicles, eight kilometres a second, closing at a walking pace.' },
+      { who: 'engineer', text: 'Everything you leave in orbit stays there. The tracking station on the main menu keeps every vessel; you can fly any of them again.' },
+    ],
+  },
 ];
 
 /** Radio lines used on every flight unless a mission overrides the trigger. */
@@ -120,6 +133,9 @@ export const GENERIC_RADIO: RadioCue[] = [
   { trigger: { on: 'landed', body: 'moon' }, lines: [{ who: 'flight', text: 'Contact! Engines off. You\'re on the Moon.' }] },
   { trigger: { on: 'landed', body: 'mars' }, lines: [{ who: 'flight', text: 'Touchdown on Mars confirmed!' }] },
   { trigger: { on: 'highg' }, lines: [{ who: 'capcom', text: 'We\'re reading seven g on the crew. Ease off if you can — they\'re greying out.' }] },
+  { trigger: { on: 'rendezvous' }, lines: [{ who: 'capcom', text: 'Inside five hundred metres. Kill the relative velocity and take it slow from here — RCS only.' }] },
+  { trigger: { on: 'docked' }, lines: [{ who: 'capcom', text: 'Capture confirmed — hard dock. Two vehicles, one spacecraft.' }] },
+  { trigger: { on: 'undocked' }, lines: [{ who: 'capcom', text: 'Undocking confirmed. Back away gently before any main-engine burn.' }], once: false },
 ];
 
 export const STORY: Record<string, MissionStory> = {
@@ -219,6 +235,86 @@ export const STORY: Record<string, MissionStory> = {
       { who: 'news', text: 'ORBITAL NEWS: APOGEE probe reaches the Moon first. Helion\'s craft still circling Earth after an engine fault.' },
     ],
     failure: [{ who: 'engineer', text: 'No encounter. Burn from the lunar window\'s parking orbit, and use the planner — the Moon won\'t wait for us.' }],
+  },
+  'free-return': {
+    brief: [
+      { who: 'engineer', text: 'A free-return trajectory: leave Earth so that the Moon\'s gravity swings you around its far side and throws you straight back home — no engine needed to come back.' },
+      { who: 'flight', text: 'Apollo flew this way for safety. Plan "To the Moon", then use "Fine-tune" so the Earth periapsis after the flyby ends up below 100 km. Then it\'s a matter of heat shield and patience.' },
+      { who: 'sofia', text: 'Skim the far side low and the pictures will be worth the trip.' },
+    ],
+    radio: [
+      { trigger: { on: 'soi', body: 'moon' }, lines: [{ who: 'capcom', text: 'Inside the Moon\'s sphere of influence. Watch the predicted trajectory swing — the Moon is doing the work now.' }] },
+      { trigger: { on: 'objective', index: 2 }, lines: [{ who: 'flight', text: 'Earth periapsis under a hundred kilometres. That\'s a free return — gravity brought you home for nothing.' }] },
+    ],
+    success: [
+      { who: 'engineer', text: 'A slingshot around the Moon and a splashdown, on gravity alone. Newton would be pleased.' },
+      { who: 'news', text: 'ORBITAL NEWS: APOGEE probe loops the Moon and returns without firing an engine, proving the crew-rescue trajectory.' },
+    ],
+    failure: [{ who: 'engineer', text: 'The flyby did not bring the periapsis low enough — or brought it too low. Trim early, while a metre per second still moves the Earth periapsis by hundreds of kilometres.' }],
+  },
+  'relay-net': {
+    brief: [
+      { who: 'director', text: 'A relay constellation: three satellites, one launch. It pays for the station and it keeps our Moon crews talking.' },
+      { who: 'engineer', text: 'The kick stage puts the stack in orbit. Then stage each radial separator by hand and use "[" and "]" to switch between the satellites — each is a spacecraft of its own once it\'s free.' },
+      { who: 'flight', text: 'Bonus for spreading them out: switch to a satellite, wait a few minutes, then release the next one.' },
+    ],
+    radio: [
+      { trigger: { on: 'orbit' }, lines: [{ who: 'capcom', text: 'Parking orbit. Deploy the relays when you\'re ready — separators are in the staging list.' }] },
+      { trigger: { on: 'objective', index: 1 }, lines: [{ who: 'sofia', text: 'Three relays, three carriers on the ground stations. The network is up.' }] },
+    ],
+    success: [
+      { who: 'director', text: 'The relay network is live. Somebody in accounting just smiled.' },
+      { who: 'engineer', text: 'Those satellites stay in orbit between flights now. Check the tracking station.' },
+    ],
+    failure: [{ who: 'engineer', text: 'A relay is useless below the atmosphere. Get the whole stack to a stable orbit before you release anything.' }],
+  },
+  keystone: {
+    brief: [
+      { who: 'priya', text: 'Keystone is my future home. Two docking ports, solar wings, and enough RCS to hold attitude for years. Put it in a clean 400-kilometre orbit.' },
+      { who: 'engineer', text: 'The station core replaces the payload on a Heron 9. Circularise between 380 and 420 km; the lower the eccentricity, the easier every future rendezvous.' },
+    ],
+    radio: [
+      { trigger: { on: 'orbit' }, lines: [{ who: 'priya', text: 'Keystone is in orbit. Now trim it — I want that orbit round.' }] },
+      { trigger: { on: 'objective', index: 1 }, lines: [{ who: 'capcom', text: 'Keystone is on station. Solar arrays tracking, ports clear.' }] },
+    ],
+    success: [
+      { who: 'priya', text: 'A station in orbit with my name on the crew list. See you up there.' },
+      { who: 'news', text: 'ORBITAL NEWS: APOGEE launches Keystone, the first module of a permanent station. Crew flights to follow.' },
+    ],
+    failure: [{ who: 'engineer', text: 'The core never reached its orbit. Keystone needs a clean, circular 400 km before anyone can meet it.' }],
+  },
+  handshake: {
+    brief: [
+      { who: 'priya', text: 'Kenji flies me up to Keystone today. Rendezvous first — we\'ll dock next time.' },
+      { who: 'engineer', text: 'Rendezvous is a phasing game. Launch into the station\'s plane, set Keystone as the target, then use "Intercept": the planner waits for the right phase and meets it. At closest approach, "Match velocity" cancels the relative speed.' },
+      { who: 'flight', text: 'Inside 200 metres with less than 2 m/s relative and the objective is done. The RCS keys (H/N, I/K, J/L) move you without turning.' },
+    ],
+    radio: [
+      { trigger: { on: 'orbit' }, lines: [{ who: 'kenji', text: 'In orbit. Where\'s our station? … there. Twelve hundred kilometres ahead and climbing away.' }] },
+      { trigger: { on: 'rendezvous' }, lines: [{ who: 'priya', text: 'Look at her. She\'s smaller than I imagined and I don\'t care at all.' }] },
+    ],
+    success: [
+      { who: 'kenji', text: 'Station-keeping at a hundred metres. She\'s beautiful, Priya.' },
+      { who: 'director', text: 'Two vehicles in formation. Next time we bring them together.' },
+    ],
+    failure: [{ who: 'engineer', text: 'No rendezvous. Match the plane first, then let the intercept planner do the phasing — it can take a few orbits.' }],
+  },
+  'hard-dock': {
+    brief: [
+      { who: 'priya', text: 'This time we go inside. Nose port to Keystone\'s port: line up, close at half a metre a second, and let the latches do the rest.' },
+      { who: 'engineer', text: 'Rendezvous as before, then RCS: target the station, hold the nose on the target marker, and creep in. Ports need to be face to face within about fifteen degrees.' },
+      { who: 'flight', text: 'Once docked you fly the combined stack. Undock is in the flight computer. Bring the crew home when you\'re done.' },
+    ],
+    radio: [
+      { trigger: { on: 'rendezvous' }, lines: [{ who: 'capcom', text: 'Five hundred metres. Nose on the target, RCS only from here.' }] },
+      { trigger: { on: 'docked' }, lines: [{ who: 'priya', text: 'Capture… latches… hard dock! Welcome aboard Keystone.' }] },
+      { trigger: { on: 'undocked' }, lines: [{ who: 'priya', text: 'Keystone is holding. Safe trip home, Kenji.' }] },
+    ],
+    success: [
+      { who: 'priya', text: 'The first crew to live on Keystone. The coffee machine is docked; the rest can follow.' },
+      { who: 'news', text: 'ORBITAL NEWS: APOGEE crew docks with Keystone station — the agency\'s first permanent foothold in orbit.' },
+    ],
+    failure: [{ who: 'engineer', text: 'No hard dock. Slower, straighter: under a metre per second and the ports aligned.' }],
   },
   'lunar-orbit': {
     brief: [

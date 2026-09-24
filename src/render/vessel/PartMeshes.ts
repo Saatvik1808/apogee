@@ -549,6 +549,43 @@ export function poseLeg(leg: { strut: Object3D; foot: Object3D; length: number; 
   leg.foot.position.copy(foot);
 }
 
+/** Androgynous docking ring: a short drum with guide petals and a collar on each face. */
+function buildDock(stats: PartStats, g: Group): void {
+  const r = stats.diameterTop / 2;
+  const h = stats.height;
+  g.add(cyl(r, r, h, MAT.grayPaint(), segs(r)));
+  for (const face of [1, -1] as const) {
+    const collar = new Mesh(new TorusGeometry(r * 0.74, r * 0.06, 8, 36), MAT.darkMetal());
+    collar.rotation.x = Math.PI / 2;
+    collar.position.y = (face * h) / 2;
+    collar.castShadow = true;
+    g.add(collar);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      const petal = box(r * 0.28, 0.04, r * 0.12, MAT.aluminum());
+      petal.position.set(Math.cos(a) * r * 0.52, face * (h / 2 + 0.02), Math.sin(a) * r * 0.52);
+      petal.rotation.y = -a;
+      g.add(petal);
+    }
+  }
+}
+
+/** RCS block: a white housing with four nozzles around it and one pointing outward. */
+function buildRcs(g: Group): void {
+  g.add(box(0.28, 0.42, 0.28, MAT.whitePaint()));
+  const nozzle = (x: number, y: number, z: number, rx: number, rz: number) => {
+    const n = cyl(0.03, 0.06, 0.1, MAT.darkMetal(), 10);
+    n.position.set(x, y, z);
+    n.rotation.set(rx, 0, rz);
+    g.add(n);
+  };
+  nozzle(0, 0.26, 0, 0, 0);
+  nozzle(0, -0.26, 0, Math.PI, 0);
+  nozzle(0, 0.05, 0.19, Math.PI / 2, 0);
+  nozzle(0, 0.05, -0.19, -Math.PI / 2, 0);
+  nozzle(0.19, 0.05, 0, 0, -Math.PI / 2);
+}
+
 function buildSolar(g: Group, vis: PartVisual): void {
   const base = box(0.2, 0.9, 0.3, MAT.darkMetal());
   g.add(base);
@@ -625,6 +662,12 @@ export function buildPartVisual(def: PartDef, stats: PartStats, cfg: PartConfig,
       break;
     case 'solar':
       buildSolar(g, vis);
+      break;
+    case 'dock':
+      buildDock(stats, g);
+      break;
+    case 'rcs':
+      buildRcs(g);
       break;
   }
   return vis;

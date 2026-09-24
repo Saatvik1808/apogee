@@ -19,7 +19,7 @@
  * optimisation (grid search + coordinate descent), apsis burns
  */
 import { Vector3 } from 'three';
-import { orbitalFrame, type Orbit } from '../physics/Orbit';
+import { Orbit, orbitalFrame } from '../physics/Orbit';
 import { TrajectoryPredictor } from '../physics/Trajectory';
 import type { CelestialBody } from '../physics/CelestialBody';
 import type { FlightSim } from './FlightSim';
@@ -180,6 +180,100 @@ function placeNode(sim: FlightSim, t: number, prograde: number, normal: number, 
   node.guidance = guidance;
   sim.editNode(node);
   return node;
+}
+
+const _orbitT = new Orbit();
+const _i1 = new Vector3();
+const _i2 = new Vector3();
+const _i3 = new Vector3();
+const _i4 = new Vector3();
+const _in = new Vector3();
+const _idv = new Vector3();
+
+function fmtKm(m: number): string {
+  return m < 10_000 ? `${m.toFixed(0)} m` : `${(m / 1000).toFixed(1)} km`;
+}
+
+/**
+ * Rendezvous, step 1: a Lambert transfer that arrives where the target vessel
+ * will be. Because two orbits at different heights drift in phase a little
+ * every revolution, the cheap opportunity may be several orbits away: departure
+ * times are scanned across up to one synodic period (capped at 24 revolutions)
+ * and flight times from a third of an orbit to one and a quarter. The cheapest
+ * total — departure Δv plus most of the arrival mismatch that the "match
+ * velocity" burn will cancel, with a small penalty per hour of waiting — wins,
+ * provided the transfer clears the atmosphere.
+ */
+export function planIntercept(sim: FlightSim): PlanResult {
+  const tv = sim.targetVessel;
+  if (!tv) return fail('Select a target vessel first (map view: click its label, or the TARGET button).');
+  const cur = currentPatch(sim);
+  if (!cur) return fail('No orbit to plan from.');
+  if (tv.body !== cur.body) return fail(`${tv.name} orbits ${tv.body.name} — get into the same sphere of influence first.`);
+  const o = cur.orbit;
+  if (!o.isElliptic) return fail('Intercepts are planned from a closed orbit.');
+  const mu = cur.body.mu;
+  const P = o.period;
+  if (!sim.targetStateAt(sim.time, _i3, _i4)) return fail('Target state unavailable.');
+  const oT = _orbitT.setFromState(_i3, _i4, mu, sim.time);
+  const pT = oT.isElliptic ? oT.period : P;
+  // Synodic period of the two orbits: how long until the phase angle repeats
+  const synodic = Math.abs(P - pT) > 1 ? Math.abs((P * pT) / (P - pT)) : 24 * P;
+  const revs = Math.max(1, Math.min(24, Math.ceil(synodic / P) + 1));
+  const floor = cur.body.radius + (cur.body.atmosphere ? cur.body.atmosphere.ceiling : 10_000) + 10_000;
+  let best: { t0: number; tof: number; dv1: Vector3; dv2: number; score: number } | null = null;
+  const tStart = sim.time + 120;
+  const nT = revs * 24;
+  for (let i = 0; i < nT; i++) {
+    const t0 = tStart + (P * revs * i) / nT;
+    o.getStateAt(t0, _i1, _i2);
+    _in.crossVectors(_i1, _i2).normalize();
+    const wait = ((t0 - sim.time) / 3600) * 4; // m/s-equivalent penalty per hour of waiting
+    for (let j = 0; j < 28; j++) {
+      const tof = P * (0.3 + (0.95 * j) / 28);
+      if (!sim.targetStateAt(t0 + tof, _i3, _i4)) return fail('Target state unavailable.');
+      const L = solveLambert(_i1, _i3, tof, mu, _in);
+      if (!L) continue;
+      _idv.copy(L.v1).sub(_i2);
+      const dv1 = _idv.length();
+      const dv2 = _i4.distanceTo(L.v2);
+      const score = dv1 + 0.7 * dv2 + wait;
+      if (best && score >= best.score) continue;
+      _orbitT.setFromState(_i1, L.v1, mu, t0);
+      if (_orbitT.periapsis < floor) continue;
+      best = { t0, tof, dv1: _idv.clone(), dv2, score };
+    }
+  }
+  if (!best) return fail('No intercept found — try from an orbit closer to the target\'s.');
+  o.getStateAt(best.t0, _i1, _i2);
+  orbitalFrame(_i1, _i2, _p, _n, _rad);
+  const node = placeNode(sim, best.t0, best.dv1.dot(_p), best.dv1.dot(_n), best.dv1.dot(_rad));
+  if (!node) {
+    const p0 = sim.predictor.patches[0];
+    return fail(`Could not place the node (departure in ${fmtDt(best.t0 - sim.time)}, predicted orbit ends ${p0 ? `${p0.endReason} in ${fmtDt(p0.endTime - sim.time)}` : 'unknown'}).`);
+  }
+  return {
+    ok: true,
+    node,
+    message: `Intercept ${tv.name}: ${best.dv1.length().toFixed(1)} m/s in ${fmtDt(best.t0 - sim.time)} · arrive ${fmtDt(best.tof)} later · then match ≈${best.dv2.toFixed(0)} m/s`,
+  };
+}
+
+/** Rendezvous, step 2: cancel the relative velocity at the predicted closest approach. */
+export function planMatchVelocity(sim: FlightSim): PlanResult {
+  const tv = sim.targetVessel;
+  const info = sim.targetInfo;
+  if (!tv || !info || isNaN(info.caTime)) return fail('Select a target vessel in the same sphere of influence first.');
+  const cur = currentPatch(sim);
+  if (!cur || tv.body !== cur.body) return fail('Target is in another sphere of influence.');
+  const t = Math.max(sim.time + 20, info.caTime);
+  cur.orbit.getStateAt(t, _i1, _i2);
+  if (!sim.targetStateAt(t, _i3, _i4)) return fail('Target state unavailable.');
+  _idv.copy(_i4).sub(_i2);
+  orbitalFrame(_i1, _i2, _p, _n, _rad);
+  const node = placeNode(sim, t, _idv.dot(_p), _idv.dot(_n), _idv.dot(_rad));
+  if (!node) return fail('Could not place the node.');
+  return { ok: true, node, message: `Match velocity: ${_idv.length().toFixed(1)} m/s in ${fmtDt(t - sim.time)} · closest approach ${fmtKm(info.caDistance)}` };
 }
 
 /** Burn at the next apoapsis (raise periapsis) or periapsis (lower apoapsis) to circularise. */

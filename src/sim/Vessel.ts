@@ -19,7 +19,7 @@
 import { Matrix3, Quaternion, Vector3 } from 'three';
 import type { CelestialBody } from '../physics/CelestialBody';
 import { Orbit } from '../physics/Orbit';
-import { layoutCraft, type CraftData } from '../parts/Craft';
+import { layoutCraft, type AttachKind, type CraftData, type CraftPart } from '../parts/Craft';
 import { stagesFromCraft } from '../parts/Staging';
 import type { SimPart } from '../parts/DeltaV';
 import { FlightPart } from './FlightPart';
@@ -49,6 +49,12 @@ export interface ControlState {
   sasMode: SASMode;
   /** Navball/SAS reference: surface-relative velocity near the ground. */
   speedMode: 'surface' | 'orbit' | 'target';
+  /** Reaction-control thrusters armed. */
+  rcs: boolean;
+  /** Translation inputs −1..1 in the vessel frame (x right, y forward/nose, z dorsal). */
+  tx: number;
+  ty: number;
+  tz: number;
 }
 
 export interface ContactPoint {
@@ -89,6 +95,8 @@ let nextVesselId = 1;
 const _v = new Vector3();
 const _v2 = new Vector3();
 const _v3 = new Vector3();
+const _q1 = new Quaternion();
+const _q2 = new Quaternion();
 const _inertia = new Float64Array(9);
 
 export class Vessel {
@@ -126,7 +134,17 @@ export class Vessel {
     sas: false,
     sasMode: 'stability',
     speedMode: 'surface',
+    rcs: false,
+    tx: 0,
+    ty: 0,
+    tz: 0,
   };
+  /** RCS jets fired this step (visuals/audio). */
+  rcsActive = false;
+  /** Persistent id in the save's tracking station (null: not saved yet). */
+  pid: string | null = null;
+  /** Campaign tag of a mission-provided vessel (e.g. the station a mission spawns). */
+  missionTag: string | null = null;
 
   situation: Situation = 'flying';
   /** Held by launch clamps. */
@@ -266,6 +284,101 @@ export class Vessel {
   /** Nose direction in the inertial frame. */
   forward(out: Vector3): Vector3 {
     return out.set(0, 1, 0).applyQuaternion(this.q);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Docking
+  // ---------------------------------------------------------------------------
+
+  /** Docking ports with an open face: +1 = the port's top (+Y) is free, −1 = its bottom. */
+  freeDockPorts(): Array<{ part: FlightPart; face: 1 | -1 }> {
+    const out: Array<{ part: FlightPart; face: 1 | -1 }> = [];
+    for (const p of this.parts) {
+      if (!p.def.dock || p.destroyed || p.dockedTo) continue;
+      if (!this.topNeighbor(p)) out.push({ part: p, face: 1 });
+      else if (!this.bottomNeighbor(p)) out.push({ part: p, face: -1 });
+    }
+    return out;
+  }
+
+  /** Centre of a docking face (relative to the body centre, inertial) and its outward direction. */
+  dockFacePose(port: FlightPart, face: 1 | -1, outPos: Vector3, outDir: Vector3): void {
+    _v.set(0, (face * port.height) / 2, 0).applyQuaternion(port.rotation).add(port.position);
+    this.localToBody(_v, outPos);
+    outDir.set(0, face, 0).applyQuaternion(port.rotation).applyQuaternion(this.q);
+  }
+
+  /**
+   * Latch `guest` onto this vessel at a pair of docking ports. The guest's parts
+   * are re-expressed in this vessel's frame and its root is hung under our port,
+   * so the combined vehicle is one part tree again — fuel groups, staging and
+   * control all follow. Linear momentum is conserved; the guest object is left
+   * empty and marked destroyed so the simulation drops it.
+   */
+  dock(hostPort: FlightPart, hostFace: 1 | -1, guest: Vessel, guestPort: FlightPart): void {
+    const qHinv = _q1.copy(this.q).invert();
+    const qRel = _q2.copy(qHinv).multiply(guest.q);
+    const originG = guest.originPosition(_v);
+    const originH = this.originPosition(_v2);
+    for (const p of guest.parts) {
+      _v3.copy(p.position).applyQuaternion(guest.q).add(originG).sub(originH).applyQuaternion(qHinv);
+      p.position.copy(_v3);
+      p.rotation.premultiply(qRel);
+    }
+    // Both vessels numbered their parts from 1: renumber the guest so uids stay
+    // unique in the merged tree (design data and staging are keyed by uid)
+    let maxUid = 0;
+    let maxSym = 0;
+    for (const p of this.parts) {
+      maxUid = Math.max(maxUid, p.uid);
+      maxSym = Math.max(maxSym, p.symmetry);
+    }
+    const uidMap = new Map<number, number>();
+    for (const p of guest.parts) {
+      uidMap.set(p.uid, p.uid + maxUid);
+      p.uid += maxUid;
+      if (p.symmetry) p.symmetry += maxSym;
+    }
+    for (let i = 0; i < guest.stages.length; i++) guest.stages[i] = guest.stages[i]!.map((u) => uidMap.get(u) ?? u);
+    const root = guest.root;
+    root.vesselName = guest.name;
+    root.parent = hostPort;
+    root.attach = hostFace > 0 ? 'above' : 'below';
+    hostPort.children.push(root);
+    hostPort.dockedTo = guestPort;
+    guestPort.dockedTo = hostPort;
+    hostPort.dockRoot = root;
+    guestPort.dockRoot = root;
+    const mH = this.mass;
+    const mG = guest.mass;
+    this.v.multiplyScalar(mH).addScaledVector(guest.v, mG).multiplyScalar(1 / (mH + mG));
+    this.parts.push(...guest.parts);
+    for (let i = guest.nextStage; i < guest.stages.length; i++) this.stages.push(guest.stages[i]!);
+    guest.parts = [];
+    guest.stages = [];
+    guest.destroyed = true;
+    this.refreshStructure();
+    this.computeMassProperties(true);
+  }
+
+  /**
+   * The current part tree as design data: what the assembly building would have
+   * to contain to rebuild this vehicle (after staging, docking, damage). Stage
+   * numbers cover the stages not yet fired. Used to persist vessels between
+   * flights and to name undocked modules.
+   */
+  toCraft(): CraftData {
+    const stageOf = new Map<number, number>();
+    for (let i = this.nextStage; i < this.stages.length; i++) for (const u of this.stages[i]!) stageOf.set(u, i - this.nextStage);
+    let maxUid = 0;
+    let maxSym = 0;
+    const parts: CraftPart[] = this.parts.map((p) => {
+      maxUid = Math.max(maxUid, p.uid);
+      maxSym = Math.max(maxSym, p.symmetry);
+      const attach: AttachKind = p.parent ? (p.attach === 'root' ? 'below' : p.attach) : 'root';
+      return { uid: p.uid, defId: p.def.id, parent: p.parent ? p.parent.uid : -1, attach, angle: p.angle, offsetY: p.offsetY, symmetry: p.symmetry, config: { ...p.config }, stage: stageOf.get(p.uid) ?? -1 };
+    });
+    return { version: 1, name: this.name, description: '', parts, nextUid: maxUid + 1, nextSymmetry: maxSym + 1, manualStaging: true };
   }
 
   // ---------------------------------------------------------------------------

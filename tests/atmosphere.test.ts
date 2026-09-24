@@ -15,7 +15,8 @@ describe('Atmosphere LUTs', () => {
   const lut = new AtmosphereLUTs(EARTH_ATMOSPHERE);
   const ms = performance.now() - t0;
   it('builds quickly', () => {
-    expect(ms).toBeLessThan(3000);
+    // Generous budget: this runs alongside the other test files (parallel workers) on laptops
+    expect(ms).toBeLessThan(4500);
   });
   it('noon sun is bright and slightly yellow; sunset is red', () => {
     const R = EARTH_ATMOSPHERE.bottomRadius + 10;

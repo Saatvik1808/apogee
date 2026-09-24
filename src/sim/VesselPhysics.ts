@@ -69,6 +69,9 @@ export type FlightEventKind =
   | 'soi-change'
   | 'fairing'
   | 'decouple'
+  | 'docked'
+  | 'undocked'
+  | 'switch'
   | 'vessel-destroyed';
 
 export interface FlightEvent {
@@ -227,6 +230,7 @@ export class VesselPhysics {
 
     this.updateMechanisms(v, dt);
     this.applyEngines(v, dt, cmd);
+    this.applyRcs(v, dt, cmd);
     this.applyControlTorque(v, cmd);
     if (v.airDensity > 1e-12) this.applyAero(v);
     else for (const p of v.parts) p.heatFlux = 0;
@@ -440,6 +444,63 @@ export class VesselPhysics {
     v.maxThrustNow = maxNow;
   }
 
+  /**
+   * Reaction-control thrusters: small hydrazine jets that translate the vessel
+   * (the tool for docking) and add attitude torque. Each quad carries its own
+   * propellant; the demand is the translation input plus half the attitude
+   * command, and all armed quads share the flow evenly.
+   */
+  private applyRcs(v: Vessel, dt: number, cmd: ControlCommand): void {
+    v.rcsActive = false;
+    const c = v.controls;
+    if (!c.rcs) return;
+    let thrust = 0;
+    let isp = 240;
+    let quads = 0;
+    for (const p of v.parts) {
+      const r = p.def.rcs;
+      if (!r || p.destroyed || p.fuel <= 0) continue;
+      thrust += r.thrust;
+      isp = r.isp;
+      quads++;
+    }
+    if (thrust <= 0) return;
+    const tx = clamp(c.tx, -1, 1);
+    const ty = clamp(c.ty, -1, 1);
+    const tz = clamp(c.tz, -1, 1);
+    const tmag = Math.hypot(tx, ty, tz);
+    if (tmag > 1e-3) {
+      const s = (thrust * Math.min(1, tmag)) / tmag;
+      this.force.x += tx * s;
+      this.force.y += ty * s;
+      this.force.z += tz * s;
+      this.nonGravForce = true;
+    }
+    const lever = this.rcsTorque(v);
+    this.torque.x += cmd.x * lever;
+    this.torque.y += cmd.y * lever;
+    this.torque.z += cmd.z * lever;
+    const att = Math.min(1, Math.abs(cmd.x) + Math.abs(cmd.y) + Math.abs(cmd.z));
+    const demand = Math.min(1, tmag) + att * 0.5;
+    if (demand <= 0.01) return;
+    v.rcsActive = true;
+    const share = ((thrust * demand) / (isp * G0)) * dt / quads;
+    for (const p of v.parts) if (p.def.rcs && !p.destroyed && p.fuel > 0) p.fuel = Math.max(0, p.fuel - share);
+  }
+
+  /** Attitude torque the armed, fuelled RCS quads can produce (N·m, per axis). */
+  private rcsTorque(v: Vessel): number {
+    if (!v.controls.rcs) return 0;
+    let lever = 0;
+    for (const p of v.parts) {
+      const r = p.def.rcs;
+      if (!r || p.destroyed || p.fuel <= 0) continue;
+      _tmp.copy(p.position).sub(v.com);
+      lever += r.thrust * 0.5 * Math.max(0.3, _tmp.length());
+    }
+    return lever;
+  }
+
   private applyControlTorque(v: Vessel, cmd: ControlCommand): void {
     let tq = 0;
     for (const p of v.parts) if (p.stats.torque > 0 && !p.destroyed) tq += p.stats.torque;
@@ -451,7 +512,7 @@ export class VesselPhysics {
 
   /** Max torque available per axis (N·m) — for the attitude controller. */
   controlAuthority(v: Vessel, out: Vector3): Vector3 {
-    let rw = 0;
+    let rw = this.rcsTorque(v);
     for (const p of v.parts) rw += p.stats.torque;
     let pitchYaw = 0;
     let roll = 0;

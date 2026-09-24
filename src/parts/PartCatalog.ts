@@ -40,7 +40,9 @@ export type PartShape =
   | 'radial-chute'
   | 'leg'
   | 'tube'
-  | 'solar';
+  | 'solar'
+  | 'dock'
+  | 'rcs';
 
 export type PlumeStyle = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'solid';
 
@@ -134,6 +136,10 @@ export interface PartDef {
   fin?: { area: number; span: number; chord: number };
   reactionWheel?: { torquePerM2: number };
   fairing?: boolean;
+  /** Androgynous docking ring: two free faces that meet slowly latch the vessels together. */
+  dock?: { size: number };
+  /** Reaction-control thruster block: total thrust (N), Isp (s) and its own propellant load (kg). */
+  rcs?: { thrust: number; isp: number; propellant: number };
   /** Minimum campaign tier needed (0 = start). */
   tier: number;
 }
@@ -162,7 +168,7 @@ function engine(
     ...e,
     chambers: e.chambers ?? 1,
     spool: e.spool ?? 0.6,
-    plume: e.propellant,
+    plume: e.propellant === 'monoprop' || e.propellant === 'solid' ? 'hypergolic' : e.propellant,
   };
   return {
     id,
@@ -471,6 +477,26 @@ export const PART_DEFS: PartDef[] = [
     tier: 0,
   },
   {
+    id: 'docking-port',
+    name: 'Docking Port',
+    category: 'coupling',
+    shape: 'dock',
+    description: 'Androgynous docking ring. Bring two ports face to face below ~1 m/s and the vessels latch into one; stage the port (or press Undock) to separate again.',
+    cost: 900_000,
+    diameter: 1.25,
+    height: 0.3,
+    dryMass: 90,
+    crashTolerance: 10,
+    maxTemp: 1400,
+    stackTop: true,
+    stackBottom: true,
+    radialMount: false,
+    allowRadialChildren: false,
+    configurable: { diameter: [1.25, 2.5] },
+    dock: { size: 1 },
+    tier: 2,
+  },
+  {
     id: 'adapter',
     name: 'Structural Adapter',
     category: 'structural',
@@ -746,6 +772,25 @@ export const PART_DEFS: PartDef[] = [
     allowRadialChildren: false,
     tier: 1,
   },
+  {
+    id: 'rcs-quad',
+    name: 'RCS Thruster Quad',
+    category: 'utility',
+    shape: 'rcs',
+    description: 'Four small hydrazine thrusters for translation (H/N, I/K, J/L) and fine attitude control — the tool for docking. Carries 60 kg of its own propellant; toggle with R.',
+    cost: 350_000,
+    diameter: 0.35,
+    height: 0.45,
+    dryMass: 40,
+    crashTolerance: 8,
+    maxTemp: 1400,
+    stackTop: false,
+    stackBottom: false,
+    radialMount: true,
+    allowRadialChildren: false,
+    rcs: { thrust: 400, isp: 240, propellant: 60 },
+    tier: 2,
+  },
 ];
 
 export const PART_MAP: ReadonlyMap<string, PartDef> = new Map(PART_DEFS.map((p) => [p.id, p]));
@@ -1011,6 +1056,19 @@ export function computePartStats(def: PartDef, cfg: PartConfig): PartStats {
       const n = num(cfg.canopies, 1);
       st.dryMass = def.dryMass + 75 * n;
       st.cost = def.cost * n;
+      break;
+    }
+    case 'dock': {
+      st.diameterTop = st.diameterBottom = d;
+      st.height = 0.25 + 0.05 * d;
+      st.dryMass = 40 * d * d + 30;
+      st.cost = 400_000 + 300_000 * d;
+      break;
+    }
+    case 'rcs': {
+      const r = def.rcs!;
+      st.propellant = 'monoprop';
+      st.propellantCapacity = r.propellant;
       break;
     }
     case 'capsule':

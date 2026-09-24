@@ -23,6 +23,10 @@
  */
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import {
+  DOCK_CAPTURE_DISTANCE,
+  DOCK_MAX_ANGLE,
+  DOCK_MAX_SPEED,
+  DOCK_SEPARATION_DV,
   LANDED_SETTLE_TIME,
   LANDED_SPEED_THRESHOLD,
   MAX_PHYSICS_STEPS_PER_FRAME,
@@ -92,6 +96,21 @@ const _b = new Vector3();
 const _q = new Quaternion();
 const _cmd: ControlCommand = { x: 0, y: 0, z: 0 };
 const _zero: ControlCommand = { x: 0, y: 0, z: 0 };
+const _dockPosA = new Vector3();
+const _dockDirA = new Vector3();
+const _dockPosB = new Vector3();
+const _dockDirB = new Vector3();
+const _orbitA = new Orbit();
+const _orbitB = new Orbit();
+
+export interface TargetInfo {
+  /** Range to the target (m) and relative speed (m/s), updated every frame. */
+  distance: number;
+  relSpeed: number;
+  /** Predicted closest approach (m) and its universal time (NaN if unknown). */
+  caDistance: number;
+  caTime: number;
+}
 
 export class FlightSim {
   readonly system: SolarSystem;
@@ -105,7 +124,10 @@ export class FlightSim {
   readonly nodePredictor = new TrajectoryPredictor(5);
   readonly nodes: ManeuverNode[] = [];
   readonly fairings: FairingPiece[] = [];
-  target: CelestialBody | null = null;
+  /** Navigation target: a body (encounters) or another vessel (rendezvous). */
+  target: CelestialBody | Vessel | null = null;
+  /** Range, closing speed and predicted closest approach to a target vessel. */
+  targetInfo: TargetInfo | null = null;
   warpIndex = 0;
   paused = false;
   /** Universal time of liftoff (NaN until launched). */
@@ -127,6 +149,8 @@ export class FlightSim {
   private readonly prevQ = new Map<number, Quaternion>();
   private predictionDirty = true;
   private predictTimer = 0;
+  /** Counter for naming controllable sections released by decouplers. */
+  private releasedUnits = 0;
   /** Seconds the active vessel has been coasting in vacuum with no forces. */
   private stageCooldown = 0;
 
@@ -188,6 +212,191 @@ export class FlightSim {
     body.surfaceVelocity(v.r, v.v);
     v.q.copy(body.rotation).multiply(v.pinnedRot);
     v.w.copy(body.angularVelocity).applyQuaternion(_q.copy(v.q).invert());
+  }
+
+  /**
+   * Put a vessel straight into a circular orbit (sandbox "start in orbit" and
+   * pre-positioned targets). Frame: +Y is the pole; the ascending node sits at
+   * longitude `lanDeg` in the equatorial plane; `nuDeg` is the angle along the
+   * orbit from that node. The nose points prograde, the dorsal side away from
+   * the planet.
+   */
+  placeInOrbit(v: Vessel, body: CelestialBody, altitude: number, incDeg = 0, lanDeg = 0, nuDeg = 0): void {
+    v.body = body;
+    const R = body.radius + altitude;
+    const speed = Math.sqrt(body.mu / R);
+    const inc = (incDeg * Math.PI) / 180;
+    const lan = (lanDeg * Math.PI) / 180;
+    const nu = (nuDeg * Math.PI) / 180;
+    const node = new Vector3(Math.cos(lan), 0, -Math.sin(lan));
+    const pole = new Vector3(0, 1, 0);
+    const eastAtNode = new Vector3().crossVectors(pole, node).normalize();
+    const inPlane = eastAtNode.clone().multiplyScalar(Math.cos(inc)).addScaledVector(pole, Math.sin(inc));
+    v.r.copy(node).multiplyScalar(Math.cos(nu)).addScaledVector(inPlane, Math.sin(nu)).multiplyScalar(R);
+    v.v.copy(node).multiplyScalar(-Math.sin(nu)).addScaledVector(inPlane, Math.cos(nu)).multiplyScalar(speed);
+    const fwd = v.v.clone().normalize();
+    const up = v.r.clone().normalize();
+    v.q.setFromRotationMatrix(new Matrix4().makeBasis(new Vector3().crossVectors(fwd, up).normalize(), fwd, up));
+    v.w.set(0, 0, 0);
+    v.pinned = false;
+    v.clamped = false;
+    v.onRails = false;
+    v.situation = 'orbiting';
+    v.airborneTime = 1e6;
+    this.physics.updateEnvironment(v);
+    v.maxAltitude = v.altitude;
+    this.attitude.resetHold(v);
+    this.predictionDirty = true;
+  }
+
+  /** Add another vessel to the flight (a persisted satellite, a target station). */
+  addVessel(v: Vessel): void {
+    if (!this.vessels.includes(v)) this.vessels.push(v);
+    this.physics.updateEnvironment(v);
+  }
+
+  /** Swap the pad vessel for one restored from the tracking station (resuming a flight). */
+  replaceActive(v: Vessel): void {
+    const old = this.active;
+    const i = this.vessels.indexOf(old);
+    if (i >= 0) this.vessels.splice(i, 1);
+    this.prevRel.delete(old.id);
+    this.prevQ.delete(old.id);
+    this.prevBody.delete(old.id);
+    this.vessels.push(v);
+    this.active = v;
+    this.physics.updateEnvironment(v);
+    v.maxAltitude = v.altitude;
+    this.attitude.resetHold(v);
+    this.predictionDirty = true;
+    this.storePrev();
+  }
+
+  /** Hand control to another vessel of this flight (the KSP "[ ]" switch). */
+  setActive(v: Vessel): void {
+    if (v === this.active || v.destroyed || !this.vessels.includes(v)) return;
+    this.active = v;
+    this.autopilot.disengage();
+    for (const n of [...this.nodes]) this.removeNode(n);
+    if (this.target === v) this.target = null;
+    if (v.onRails && !this.warp.rails) {
+      v.railsOrbit.getStateAt(this.time, v.r, v.v);
+      v.onRails = false;
+    }
+    this.attitude.resetHold(v);
+    this.predictionDirty = true;
+    this.physics.emit('switch', v, `Controlling ${v.name}`);
+  }
+
+  /** Switch to the next / previous controllable vessel. */
+  cycleActive(dir: 1 | -1): Vessel | null {
+    const list = this.vessels.filter((x) => !x.destroyed && x.isControllable && !x.debris);
+    if (list.length < 2) return null;
+    const i = list.indexOf(this.active);
+    const next = list[(i + dir + list.length) % list.length]!;
+    this.setActive(next);
+    return next;
+  }
+
+  get targetBody(): CelestialBody | null {
+    return this.target instanceof CB ? this.target : null;
+  }
+
+  get targetVessel(): Vessel | null {
+    return this.target instanceof Vessel ? this.target : null;
+  }
+
+  /** Absolute position of the current target; false when there is none. */
+  targetPosition(out: Vector3): boolean {
+    if (!this.target) return false;
+    if (this.target instanceof Vessel) this.target.absolutePosition(out);
+    else out.copy(this.target.position);
+    return true;
+  }
+
+  targetVelocity(out: Vector3): boolean {
+    if (!this.target) return false;
+    if (this.target instanceof Vessel) this.target.absoluteVelocity(out);
+    else out.copy(this.target.velocity);
+    return true;
+  }
+
+  /**
+   * Body-relative state of the target vessel at time t (two-body propagation of
+   * its current orbit). False if there is no target vessel in the active
+   * vessel's sphere of influence.
+   */
+  targetStateAt(t: number, outR: Vector3, outV: Vector3): boolean {
+    const tv = this.targetVessel;
+    if (!tv || tv.destroyed || tv.body !== this.active.body || tv.pinned) return false;
+    const o = tv.onRails ? tv.railsOrbit : _orbitB.setFromState(tv.r, tv.v, tv.body.mu, this.time);
+    o.getStateAt(t, outR, outV);
+    return true;
+  }
+
+  private updateTargetInfo(recomputeCA: boolean): void {
+    const tv = this.targetVessel;
+    if (tv && tv.destroyed) this.target = null;
+    if (!tv || tv.destroyed || this.active.destroyed) {
+      this.targetInfo = null;
+      return;
+    }
+    const a = this.active;
+    tv.absolutePosition(_a);
+    a.absolutePosition(_b);
+    const info = this.targetInfo ?? { distance: 0, relSpeed: 0, caDistance: NaN, caTime: NaN };
+    info.distance = _a.distanceTo(_b);
+    tv.absoluteVelocity(_a);
+    a.absoluteVelocity(_b);
+    info.relSpeed = _a.distanceTo(_b);
+    if (recomputeCA || isNaN(info.caTime)) this.closestApproach(a, tv, info);
+    this.targetInfo = info;
+  }
+
+  /**
+   * Closest approach between the active vessel and a target vessel: both orbits
+   * are sampled over the next two revolutions (coarse scan, then a golden-section
+   * refinement around the minimum).
+   */
+  private closestApproach(a: Vessel, tv: Vessel, info: TargetInfo): void {
+    if (a.body !== tv.body || a.pinned || tv.pinned) {
+      info.caDistance = NaN;
+      info.caTime = NaN;
+      return;
+    }
+    const mu = a.body.mu;
+    const oa = this.predictor.count > 0 && this.predictor.patches[0]!.body === a.body ? this.predictor.patches[0]!.orbit : _orbitA.setFromState(a.r, a.v, mu, this.time);
+    const ob = tv.onRails ? tv.railsOrbit : _orbitB.setFromState(tv.r, tv.v, mu, this.time);
+    const pa = oa.isElliptic ? oa.period : 3 * 3600;
+    const pb = ob.isElliptic ? ob.period : 3 * 3600;
+    const horizon = Math.min(2 * 86400, 2 * Math.max(pa, pb));
+    const dist = (t: number): number => {
+      oa.getStateAt(t, _r);
+      ob.getStateAt(t, _v);
+      return _r.distanceTo(_v);
+    };
+    const N = 600;
+    let best = Infinity;
+    let bestT = this.time;
+    for (let i = 0; i <= N; i++) {
+      const t = this.time + (horizon * i) / N;
+      const d = dist(t);
+      if (d < best) {
+        best = d;
+        bestT = t;
+      }
+    }
+    let lo = Math.max(this.time, bestT - horizon / N);
+    let hi = bestT + horizon / N;
+    for (let k = 0; k < 28; k++) {
+      const m1 = lo + (hi - lo) * 0.382;
+      const m2 = lo + (hi - lo) * 0.618;
+      if (dist(m1) < dist(m2)) hi = m2;
+      else lo = m1;
+    }
+    const t = (lo + hi) / 2;
+    info.caTime = t;
+    info.caDistance = dist(t);
   }
 
   // ---------------------------------------------------------------------------
@@ -313,8 +522,9 @@ export class FlightSim {
     // re-evaluates the bodies at simulation time.
     this.renderTime = this.time - (1 - this.alpha) * PHYSICS_DT;
     this.system.update(this.renderTime);
-    this.updatePrediction(realDt);
+    const predicted = this.updatePrediction(realDt);
     this.updateNodes();
+    this.updateTargetInfo(predicted);
     // Drain physics events
     if (this.physics.events.length) {
       this.events.push(...this.physics.events);
@@ -401,6 +611,7 @@ export class FlightSim {
       this.updateSituation(v, dt);
     }
     this.updateFairings(dt);
+    this.checkDocking();
     this.cullVessels();
     if (this.stageCooldown > 0) this.stageCooldown -= dt;
     // Liftoff detection: the lowest point of the vehicle has left the ground (the
@@ -438,7 +649,7 @@ export class FlightSim {
       // per frame on an interplanetary cruise (encounter scans of every planet).
       const cached = this.predictor.count > 0 ? this.predictor.patches[0]! : null;
       const valid = cached && !this.predictionDirty && cached.body === v.body && this.time >= cached.startTime - 1e-6 && this.time <= cached.endTime + 1e-6;
-      if (!valid) this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 2, target: this.target });
+      if (!valid) this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 2, target: this.targetBody });
       const p0 = this.predictor.patches[0]!;
       if (p0.endReason !== 'none' && p0.endTime < tEnd) {
         tEnd = p0.endReason === 'impact' ? Math.max(this.time, p0.endTime - 30) : p0.endTime + 1e-3;
@@ -534,9 +745,9 @@ export class FlightSim {
       }
       case 'target':
       case 'anti-target': {
-        if (!this.target) return null;
+        if (!this.targetPosition(_b)) return null;
         v.absolutePosition(_a);
-        out.copy(this.target.position).sub(_a).normalize();
+        out.copy(_b).sub(_a).normalize();
         return c.sasMode === 'target' ? out : out.negate();
       }
       case 'maneuver': {
@@ -581,8 +792,9 @@ export class FlightSim {
     if (ignitedSomething && v.controls.throttle <= 0) v.controls.throttle = 1;
     for (const uid of uids) {
       const p = v.partByUid(uid);
-      if (!p || !p.def.decoupler) continue;
-      this.decouple(v, p);
+      if (!p) continue;
+      if (p.def.decoupler) this.decouple(v, p);
+      else if (p.def.dock && p.dockedTo) this.undock(p);
     }
     if (wasPrelaunch) {
       v.clamped = false;
@@ -614,23 +826,111 @@ export class FlightSim {
       child.situation = v.situation;
       // Radial boosters: small outward tumble
       if (d.radial) child.w.set(0, 0, 0.12).applyQuaternion(p.rotation);
+      // A released section with its own command part is a spacecraft, not debris: name it
+      if (child.isControllable) child.name = `${v.name.replace(/ debris$/, '')} · unit ${++this.releasedUnits}`;
       this.vessels.push(child);
       this.physics.emit('decouple', v, 'Stage separation', p);
-      // The root part stays with `v`; if the command module (and thus control)
-      // went with the separated section, THAT is the vessel the player flies on
-      if (v === this.active && !v.isControllable && child.isControllable) {
-        child.name = v.name;
-        v.name = `${v.name} debris`;
-        child.debris = false;
-        v.debris = true;
-        child.controls.throttle = v.controls.throttle;
-        child.controls.sas = v.controls.sas;
-        child.controls.sasMode = v.controls.sasMode;
-        v.controls.throttle = 0;
-        this.active = child;
-        this.attitude.resetHold(child);
+      this.followCommandModule(v, child, true);
+    }
+  }
+
+  /**
+   * After a split the root side stays `v`; if the command module (and thus
+   * control) went with the separated section, THAT is the vessel the player
+   * flies on.
+   */
+  private followCommandModule(v: Vessel, child: Vessel, rename: boolean): void {
+    if (v !== this.active || v.isControllable || !child.isControllable) return;
+    if (rename) {
+      child.name = v.name;
+      v.name = `${v.name} debris`;
+    }
+    child.debris = false;
+    v.debris = !v.isControllable;
+    child.controls.throttle = v.controls.throttle;
+    child.controls.sas = v.controls.sas;
+    child.controls.sasMode = v.controls.sasMode;
+    v.controls.throttle = 0;
+    this.active = child;
+    this.attitude.resetHold(child);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Docking
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Latch the active vessel to another one when two free docking faces meet:
+   * within DOCK_CAPTURE_DISTANCE, facing each other within DOCK_MAX_ANGLE, and
+   * closing slower than DOCK_MAX_SPEED. Ports must be the same size.
+   */
+  private checkDocking(): void {
+    const a = this.active;
+    if (a.destroyed || a.pinned || a.onRails) return;
+    const portsA = a.freeDockPorts();
+    if (!portsA.length) return;
+    a.absolutePosition(_a);
+    for (const b of this.vessels) {
+      if (b === a || b.destroyed || b.pinned || b.body !== a.body) continue;
+      b.absolutePosition(_b);
+      if (_a.distanceTo(_b) > 60) continue;
+      const portsB = b.freeDockPorts();
+      if (!portsB.length) continue;
+      if (_r.copy(a.v).sub(b.v).length() > DOCK_MAX_SPEED) continue;
+      for (const pa of portsA) {
+        a.dockFacePose(pa.part, pa.face, _dockPosA, _dockDirA);
+        for (const pb of portsB) {
+          if (Math.abs(pa.part.stats.diameterTop - pb.part.stats.diameterTop) > 0.01) continue;
+          b.dockFacePose(pb.part, pb.face, _dockPosB, _dockDirB);
+          if (_dockPosA.distanceTo(_dockPosB) > DOCK_CAPTURE_DISTANCE) continue;
+          if (_dockDirA.dot(_dockDirB) > -Math.cos(DOCK_MAX_ANGLE)) continue;
+          if (b.onRails) {
+            b.railsOrbit.getStateAt(this.time, b.r, b.v);
+            b.onRails = false;
+          }
+          const otherName = b.name;
+          if (this.target === b) this.target = null;
+          a.dock(pa.part, pa.face, b, pb.part);
+          a.controls.tx = a.controls.ty = a.controls.tz = 0;
+          this.attitude.resetHold(a);
+          this.predictionDirty = true;
+          this.physics.emit('docked', a, `Docked with ${otherName}`, pa.part);
+          return;
+        }
       }
     }
+  }
+
+  /** Release a docked module at `port` (either side of the pair). */
+  undock(port: FlightPart): boolean {
+    const v = this.active;
+    const root = port.dockRoot;
+    const other = port.dockedTo;
+    if (!root || !other || !root.parent || !v.parts.includes(port)) return false;
+    const hostPort = root.parent;
+    const face: 1 | -1 = root.attach === 'above' ? 1 : -1;
+    // Push the module away along the host port's docking axis
+    const axis = new Vector3(0, face, 0).applyQuaternion(hostPort.rotation).applyQuaternion(v.q).negate();
+    port.dockedTo = null;
+    other.dockedTo = null;
+    port.dockRoot = null;
+    other.dockRoot = null;
+    const child = v.split(root, DOCK_SEPARATION_DV, axis);
+    if (!child) return false;
+    child.name = root.vesselName ?? `${v.name} module`;
+    root.vesselName = null;
+    child.debris = !child.isControllable;
+    child.situation = v.situation;
+    this.vessels.push(child);
+    this.followCommandModule(v, child, false);
+    this.predictionDirty = true;
+    this.physics.emit('undocked', this.active, `Undocked from ${this.active === v ? child.name : v.name}`, port);
+    return true;
+  }
+
+  /** Docked module roots on the active vessel (for the Undock button). */
+  dockedPorts(): FlightPart[] {
+    return this.active.parts.filter((p) => !!p.def.dock && !!p.dockedTo && !!p.dockRoot && p.dockRoot.parent === p);
   }
 
   private jettisonFairing(v: Vessel, p: FlightPart): void {
@@ -873,12 +1173,13 @@ export class FlightSim {
   // Prediction & maneuver nodes
   // ---------------------------------------------------------------------------
 
-  private updatePrediction(realDt: number): void {
+  /** Returns true when a new prediction was computed this frame. */
+  private updatePrediction(realDt: number): boolean {
     this.predictTimer -= realDt;
     const v = this.active;
     if (v.destroyed) {
       this.predictor.count = 0;
-      return;
+      return false;
     }
     // A coasting orbit only changes at discrete events (staging, SOI change, node
     // edits), which set predictionDirty; otherwise a timer sets the cadence — fast
@@ -886,27 +1187,32 @@ export class FlightSim {
     // Each prediction is up to four conic patches with encounter scans, so running
     // it every rendered frame was the single biggest CPU cost of a coast.
     const thrusting = v.totalThrust > 0 || v.inAtmosphere;
-    if (!this.predictionDirty && this.predictTimer > 0) return;
+    if (!this.predictionDirty && this.predictTimer > 0) return false;
     this.predictTimer = thrusting ? 0.05 : 0.2;
     this.predictionDirty = false;
     if (v.pinned && v.situation !== 'landed') {
       this.predictor.count = 0;
-      return;
+      return true;
     }
     const src = v.onRails ? v.railsOrbit : null;
     if (src) {
       src.getStateAt(this.time, _r, _v);
-      this.predictor.predict(v.body, _r, _v, this.time, { maxPatches: 4, target: this.target });
+      this.predictor.predict(v.body, _r, _v, this.time, { maxPatches: 4, target: this.targetBody });
     } else {
-      this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 4, target: this.target });
+      this.predictor.predict(v.body, v.r, v.v, this.time, { maxPatches: 4, target: this.targetBody });
     }
+    return true;
   }
 
   /** Patch index of the active prediction containing time t (or -1). */
   patchAt(t: number): number {
     for (let i = 0; i < this.predictor.count; i++) {
       const p = this.predictor.patches[i]!;
-      if (t >= p.startTime - 1e-6 && t <= p.endTime + 1e-6) return i;
+      // A closed orbit with no event ahead repeats forever: nodes may be placed
+      // any number of revolutions out (rendezvous phasing needs that), even though
+      // the drawn patch covers one revolution
+      const open = p.endReason === 'none' && p.orbit.isElliptic && i === this.predictor.count - 1;
+      if (t >= p.startTime - 1e-6 && (open || t <= p.endTime + 1e-6)) return i;
     }
     return -1;
   }
@@ -986,7 +1292,7 @@ export class FlightSim {
       if (idx >= 0 && this.predictor.patches[idx]!.body === n0.body) {
         const orbit = this.predictor.patches[idx]!.orbit;
         nodeStateAfter(n0, orbit, _r, _v);
-        this.nodePredictor.predict(n0.body, _r, _v, n0.time, { maxPatches: 4, target: this.target });
+        this.nodePredictor.predict(n0.body, _r, _v, n0.time, { maxPatches: 4, target: this.targetBody });
       } else this.nodePredictor.count = 0;
     } else {
       this.nodePredictor.count = 0;

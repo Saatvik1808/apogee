@@ -101,8 +101,19 @@ orbit to add a maneuver node · Back button opens the pause menu.
 | Z / X           | Full / cut throttle            | N       | Add maneuver node (map view)    |
 | , / .           | Time warp down / up            | V       | Cycle camera                    |
 | /               | Stop time warp                 | P       | Pause                           |
-| H or F1         | Help                           | F2      | Hide the HUD                    |
-| Esc             | Pause menu                     |         |                                 |
+| F1              | Help                           | F2      | Hide the HUD                    |
+| Esc             | Pause menu                     | R       | Toggle RCS thrusters            |
+| H / N           | RCS translate forward / back   | I / K   | RCS translate up / down         |
+| J / L           | RCS translate left / right     | [ / ]   | Switch to previous / next vessel |
+
+**Orbital operations** — the flight computer's **Target ▸** button cycles the navigation target
+(Moon, Mars, then every other vessel in the flight); in the map view, click a vessel's label
+to target it and click again to fly it. With a target vessel selected, **Intercept** plans a
+phasing transfer that meets it and **Match velocity** cancels the relative speed at closest
+approach. Bring two docking ports face to face below about 1 m/s and the vessels latch into
+one; **Undock** (or staging the port) separates them again. Everything you leave in orbit —
+or on the Moon or Mars — is kept in the **Tracking station** on the main menu and can be
+flown again later; the campaign clock moves forward between flights.
 
 **Assembly building**
 
@@ -121,9 +132,10 @@ orbit to add a maneuver node · Back button opens the pause menu.
 
 | Parameter                         | Effect                                                        |
 | --------------------------------- | ------------------------------------------------------------- |
-| `?quick=<template>`               | Launch a template directly: `pathfinder`, `sprite`, `heron`, `heron-lander`, `colossus` |
+| `?quick=<template>`               | Launch a template directly: `pathfinder`, `sprite`, `heron`, `heron-lander`, `nimbus`, `nimbus-relay`, `keystone`, `keystone-core`, `kestrel-dock`, `ares`, `colossus` |
 | `&site=<id>`                      | Launch site: `cape`, `kourou`, `baikonur`, `vandenberg`        |
-| `&tod=<time>`                     | `dawn`, `morning`, `noon`, `dusk`, `night` or `lunar` (window) |
+| `&tod=<time>`                     | `dawn`, `morning`, `noon`, `dusk`, `night`, `lunar` or `mars` (windows) |
+| `&orbit=<start>`                  | Skip the ascent: `leo` (250 km), `geo`, `moon` (100 km lunar orbit), `mars` (300 km) |
 | `?vab`                            | Open the assembly building                                     |
 | `?unlock`                         | Unlock every campaign mission                                  |
 | `?depth=log`                      | Force the logarithmic depth fallback                           |

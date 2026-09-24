@@ -17,7 +17,8 @@ import type { PropellantId } from '../parts/Propellants';
 export type ChuteState = 'stowed' | 'armed' | 'semi' | 'full' | 'cut';
 
 export class FlightPart {
-  readonly uid: number;
+  /** Unique within its vessel (renumbered when two vessels dock). */
+  uid: number;
   readonly def: PartDef;
   readonly config: PartConfig;
   readonly stats: PartStats;
@@ -78,6 +79,14 @@ export class FlightPart {
   destroyed = false;
   /** Visual hint: interstage shell carried by a stack decoupler (set by the renderer). */
   interstage: { radius: number; height: number } | null = null;
+
+  // --- docking ----------------------------------------------------------------
+  /** Partner port while docked. */
+  dockedTo: FlightPart | null = null;
+  /** Root of the docked vessel's part subtree — the split point for undocking. */
+  dockRoot: FlightPart | null = null;
+  /** Name of the vessel this part was the root of before it docked (restored on undock). */
+  vesselName: string | null = null;
 
   constructor(
     uid: number,
