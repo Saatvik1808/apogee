@@ -17,6 +17,13 @@
  *           with Coulomb friction; landing legs are softer and tougher.
  *  GRAVITY  −μr/|r|³, integrated with velocity-Verlet (symplectic, 2nd order)
  *           so orbits don't slowly gain energy.
+ *  CONTROL  Reaction wheels, gimballed engines, RCS jets — and in the air,
+ *           all-moving control fins. Each fin deflects in proportion to how well
+ *           ITS torque (lever arm × lift direction) lines up with the commanded
+ *           torque, so any fin layout steers without a hand-written mixer.
+ *
+ * Fuel flow: engines draw from the tanks of their fuel group; with crossfeed
+ * decouplers the deepest tanks (the boosters) drain first — asparagus staging.
  *
  * Rotation follows Euler's rigid-body equation I·ω̇ = τ − ω×(Iω) in the vessel frame.
  *
@@ -47,7 +54,7 @@ import { clamp } from '../core/math';
 import { createAtmosphereSample } from '../physics/Atmosphere';
 import type { WindField } from '../physics/Wind';
 import type { FlightPart } from './FlightPart';
-import type { Vessel } from './Vessel';
+import type { AeroFin, Vessel } from './Vessel';
 
 export type FlightEventKind =
   | 'stage'
@@ -99,6 +106,16 @@ export interface ControlCommand {
   z: number;
 }
 
+/** Sandbox cheats (never offered in campaign missions). */
+export interface Cheats {
+  /** Tanks, grains and RCS never empty; engines never run out of ignitions. */
+  infiniteFuel: boolean;
+  /** No crash, overheat or aerodynamic break-up damage. */
+  indestructible: boolean;
+  /** No aerodynamic heating. */
+  noHeat: boolean;
+}
+
 const _up = new Vector3();
 const _vAir = new Vector3();
 const _vAirL = new Vector3();
@@ -125,6 +142,9 @@ const _nL = new Vector3();
 const _tL = new Vector3();
 const _rx = new Vector3();
 const _Ir = new Vector3();
+const _hn = new Vector3();
+const _nd = new Vector3();
+const _vac = new Vector3(0, 1, 0);
 
 function machFactor(m: number): number {
   if (m < 0.8) return 1;
@@ -144,6 +164,7 @@ export class VesselPhysics {
   time = 0;
   /** This flight's weather (null = still air). */
   wind: WindField | null = null;
+  readonly cheats: Cheats = { infiniteFuel: false, indestructible: false, noHeat: false };
 
   /** Force & torque (vessel frame) accumulators. */
   private readonly force = new Vector3();
@@ -229,11 +250,25 @@ export class VesselPhysics {
     _qInv.copy(v.q).invert();
 
     this.updateMechanisms(v, dt);
+    // Infinite-propellant cheat: keep every tank, grain and RCS supply topped up
+    // (also revives stages that ran dry before the cheat was switched on)
+    if (this.cheats.infiniteFuel) {
+      for (const p of v.parts) {
+        if (p.fuelCapacity > 0 && p.fuel < p.fuelCapacity) {
+          p.fuel = p.fuelCapacity;
+          if (p.isSolid) p.flameout = false;
+        }
+      }
+    }
     this.applyEngines(v, dt, cmd);
     this.applyRcs(v, dt, cmd);
     this.applyControlTorque(v, cmd);
-    if (v.airDensity > 1e-12) this.applyAero(v);
-    else for (const p of v.parts) p.heatFlux = 0;
+    if (v.airDensity > 1e-12) this.applyAero(v, cmd);
+    else {
+      for (const p of v.parts) p.heatFlux = 0;
+      // No air: control fins still follow the stick (visual only)
+      for (const fin of v.aeroFins) if (fin.control > 0) fin.part.finDeflect = this.finDeflection(v, fin, _vac, 1, cmd);
+    }
     this.applyThermal(v, dt);
     this.applyContacts(v, dt);
 
@@ -256,8 +291,12 @@ export class VesselPhysics {
         }
       }
       if (p.def.shape === 'solar') {
-        const target = v.altitude > (v.body.atmosphere ? v.body.atmosphere.ceiling : 0) && v.situation !== 'prelaunch' ? 1 : 0;
+        const target = !p.solarStowed && v.altitude > (v.body.atmosphere ? v.body.atmosphere.ceiling : 0) && v.situation !== 'prelaunch' ? 1 : 0;
         p.solarDeploy = clamp(p.solarDeploy + Math.sign(target - p.solarDeploy) * dt * 0.25, 0, 1);
+      }
+      if (p.def.airbrake) {
+        const target = v.controls.brakes ? 1 : 0;
+        if (p.brakeDeploy !== target) p.brakeDeploy = clamp(p.brakeDeploy + Math.sign(target - p.brakeDeploy) * dt * 1.6, 0, 1);
       }
       const chute = p.def.parachute;
       if (chute && p.chuteState !== 'stowed' && p.chuteState !== 'cut') {
@@ -280,7 +319,7 @@ export class VesselPhysics {
           }
         } else if (p.chuteState === 'semi') {
           p.chuteDeploy = Math.min(1, p.chuteDeploy + dt * 0.8);
-          if (v.radarAltitude < chute.deployAltitude) {
+          if (v.radarAltitude < (p.config.deployAlt ?? chute.deployAltitude)) {
             p.chuteState = 'full';
             p.chuteDeploy = 0.07;
             this.emit('chute-full', v, `${p.def.name} fully deployed`, p);
@@ -305,22 +344,42 @@ export class VesselPhysics {
   }
 
   // ---------------------------------------------------------------------------
+  /**
+   * Take `amount` kg of an engine's propellant. Solids burn their own grain;
+   * liquids drain the tanks of their fuel group, deepest flow level first
+   * (crossfed boosters before the core), evenly within a level.
+   */
   private drawFuel(v: Vessel, p: FlightPart, amount: number): number {
     if (p.isSolid) {
+      if (this.cheats.infiniteFuel) return p.fuel > 0 ? amount : 0;
       const got = Math.min(amount, p.fuel);
       p.fuel -= got;
       return got;
     }
     const prop = p.def.engine!.propellant;
     let total = 0;
+    let deepest = -1;
     for (const t of v.parts) {
-      if (t.group === p.group && t.propellant === prop && !t.isSolid) total += t.fuel;
+      if (t.group !== p.group || t.propellant !== prop || t.isSolid || t.fuel <= 0) continue;
+      total += t.fuel;
+      if (t.flowDepth > deepest) deepest = t.flowDepth;
     }
     if (total <= 0) return 0;
-    const got = Math.min(amount, total);
-    const k = got / total;
-    for (const t of v.parts) {
-      if (t.group === p.group && t.propellant === prop && !t.isSolid) t.fuel = Math.max(0, t.fuel - t.fuel * k);
+    if (this.cheats.infiniteFuel) return amount;
+    let need = Math.min(amount, total);
+    const got = need;
+    for (let depth = deepest; depth >= 0 && need > 1e-12; depth--) {
+      let level = 0;
+      for (const t of v.parts) if (t.group === p.group && t.propellant === prop && !t.isSolid && t.flowDepth === depth) level += t.fuel;
+      if (level <= 0) continue;
+      const take = Math.min(need, level);
+      const k = take / level;
+      for (const t of v.parts) {
+        if (t.group !== p.group || t.propellant !== prop || t.isSolid || t.flowDepth !== depth) continue;
+        const left = t.fuel - t.fuel * k;
+        t.fuel = left > 1e-9 ? left : 0;
+      }
+      need -= take;
     }
     return got;
   }
@@ -356,12 +415,12 @@ export class VesselPhysics {
         const c = v.controls.throttle;
         target = c > 0.001 ? Math.max(c, minThrottle) : 0;
         if (target > 0 && !p.engineRunning) {
-          if (p.ignitionsLeft > 0 && this.fuelAvailable(v, p) > 0) {
-            p.ignitionsLeft--;
+          if ((p.ignitionsLeft > 0 || this.cheats.infiniteFuel) && this.fuelAvailable(v, p) > 0) {
+            if (!this.cheats.infiniteFuel) p.ignitionsLeft--;
             p.engineRunning = true;
             p.flameout = false;
             this.emit('ignition', v, `${p.def.name} ignition`, p);
-          } else if (p.ignitionsLeft <= 0 && !p.flameout) {
+          } else if (p.ignitionsLeft <= 0 && !this.cheats.infiniteFuel && !p.flameout) {
             p.flameout = true;
             this.emit('no-ignitions', v, `${p.def.name}: no ignitions remaining`, p);
           }
@@ -404,7 +463,7 @@ export class VesselPhysics {
       total += thrust;
 
       // Gimbal: deflection in the vessel frame from the control command
-      const gMax = e ? e.gimbal : p.def.solid ? p.def.solid.gimbal : 0;
+      const gMax = p.config.gimbalLock ? 0 : e ? e.gimbal : p.def.solid ? p.def.solid.gimbal : 0;
       const tanMax = Math.tan(gMax);
       // Application point: top of engine (gimbal pivot) for liquids, centre for solids
       _p.set(0, p.isSolid ? 0 : p.height / 2, 0).applyQuaternion(p.rotation).add(p.position);
@@ -432,8 +491,12 @@ export class VesselPhysics {
       const kg = 1 - Math.exp(-dt / 0.08);
       p.gimbalX += (gx - p.gimbalX) * kg;
       p.gimbalZ += (gz - p.gimbalZ) * kg;
-      // Thrust direction (vessel frame)
-      _F.set(p.gimbalX, 1, p.gimbalZ).normalize().multiplyScalar(thrust);
+      // Thrust direction (vessel frame): the engine's own axis (canted engines
+      // push partly sideways) tilted by the gimbal
+      _F.set(0, 1, 0).applyQuaternion(p.rotation);
+      _F.x += p.gimbalX;
+      _F.z += p.gimbalZ;
+      _F.normalize().multiplyScalar(thrust);
       this.force.add(_F);
       _tmp.set(dx, dy, dz);
       _T.crossVectors(_tmp, _F);
@@ -454,15 +517,15 @@ export class VesselPhysics {
     v.rcsActive = false;
     const c = v.controls;
     if (!c.rcs) return;
+    const pool = this.monopropPool(v);
+    if (pool <= 0) return;
     let thrust = 0;
     let isp = 240;
-    let quads = 0;
     for (const p of v.parts) {
       const r = p.def.rcs;
-      if (!r || p.destroyed || p.fuel <= 0) continue;
+      if (!r || p.destroyed) continue;
       thrust += r.thrust;
       isp = r.isp;
-      quads++;
     }
     if (thrust <= 0) return;
     const tx = clamp(c.tx, -1, 1);
@@ -484,17 +547,27 @@ export class VesselPhysics {
     const demand = Math.min(1, tmag) + att * 0.5;
     if (demand <= 0.01) return;
     v.rcsActive = true;
-    const share = ((thrust * demand) / (isp * G0)) * dt / quads;
-    for (const p of v.parts) if (p.def.rcs && !p.destroyed && p.fuel > 0) p.fuel = Math.max(0, p.fuel - share);
+    if (this.cheats.infiniteFuel) return;
+    // Monopropellant flows vessel-wide: the quads' own supply and every monoprop tank
+    const use = Math.min(pool, ((thrust * demand) / (isp * G0)) * dt);
+    const k = use / pool;
+    for (const p of v.parts) if (p.propellant === 'monoprop' && !p.isEngine && !p.destroyed) p.fuel = Math.max(0, p.fuel - p.fuel * k);
+  }
+
+  /** Monopropellant available to the RCS anywhere on the vessel (kg). */
+  monopropPool(v: Vessel): number {
+    let m = 0;
+    for (const p of v.parts) if (p.propellant === 'monoprop' && !p.isEngine && !p.destroyed) m += p.fuel;
+    return m;
   }
 
   /** Attitude torque the armed, fuelled RCS quads can produce (N·m, per axis). */
   private rcsTorque(v: Vessel): number {
-    if (!v.controls.rcs) return 0;
+    if (!v.controls.rcs || this.monopropPool(v) <= 0) return 0;
     let lever = 0;
     for (const p of v.parts) {
       const r = p.def.rcs;
-      if (!r || p.destroyed || p.fuel <= 0) continue;
+      if (!r || p.destroyed) continue;
       _tmp.copy(p.position).sub(v.com);
       lever += r.thrust * 0.5 * Math.max(0.3, _tmp.length());
     }
@@ -519,18 +592,70 @@ export class VesselPhysics {
     for (const p of v.parts) {
       if (!p.isEngine || p.thrust <= 0) continue;
       const e = p.def.engine;
-      const gMax = e ? e.gimbal : p.def.solid ? p.def.solid.gimbal : 0;
+      const gMax = p.config.gimbalLock ? 0 : e ? e.gimbal : p.def.solid ? p.def.solid.gimbal : 0;
       if (gMax <= 0) continue;
       const tanMax = Math.tan(gMax);
       _p.set(0, p.isSolid ? 0 : p.height / 2, 0).applyQuaternion(p.rotation).add(p.position).sub(v.com);
       pitchYaw += p.thrust * tanMax * Math.abs(_p.y);
       roll += p.thrust * tanMax * Math.hypot(_p.x, _p.z);
     }
-    return out.set(rw + pitchYaw, rw + roll, rw + pitchYaw);
+    out.set(rw + pitchYaw, rw + roll, rw + pitchYaw);
+    // Control fins: lift change per radian × max deflection, times each lever arm
+    const q = v.dynamicPressure;
+    if (q > 1) {
+      for (const fin of v.aeroFins) {
+        if (fin.control <= 0 || fin.part.destroyed) continue;
+        const k = q * fin.area * FIN_LIFT_SLOPE * Math.sin(fin.control) * Math.min(machFactor(v.mach), 1.3);
+        _tmp.copy(fin.pos).sub(v.com);
+        _rx.crossVectors(_tmp, fin.normal);
+        out.x += k * Math.abs(_rx.x);
+        out.y += k * Math.abs(_rx.y);
+        out.z += k * Math.abs(_rx.z);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Deflection (rad) of an all-moving fin for a commanded torque. Turning the fin
+   * by δ about its hinge tilts its normal toward t = hinge × n, which changes its
+   * angle of attack by ≈ δ·(flow along t) and — below the stall — its lift by
+   * that much: the torque gained per radian is −flow·(r × n). Deflect by how well
+   * that lines up with the command. Past the stall more angle means LESS lift, so
+   * the linear guess is checked against the real lift model and flipped (or
+   * dropped) when it would turn the vessel the wrong way.
+   */
+  private finDeflection(v: Vessel, fin: AeroFin, vp: Vector3, vt: number, cmd: ControlCommand): number {
+    _hn.crossVectors(fin.hinge, fin.normal);
+    const flow = vp.dot(_hn) / Math.max(vt, 1e-6);
+    _tmp.copy(fin.pos).sub(v.com);
+    _rx.crossVectors(_tmp, fin.normal).multiplyScalar(-flow);
+    const mag = _rx.length();
+    if (mag < 1e-6) return 0;
+    const u = (_rx.x * cmd.x + _rx.y * cmd.y + _rx.z * cmd.z) / mag;
+    const d = clamp(u, -1, 1) * fin.control;
+    if (Math.abs(d) < 1e-4) return d;
+    const base = this.finTorqueAlong(v, fin, vp, vt, 0, cmd);
+    if (this.finTorqueAlong(v, fin, vp, vt, d, cmd) >= base) return d;
+    return this.finTorqueAlong(v, fin, vp, vt, -d, cmd) > base ? -d : 0;
+  }
+
+  /** Torque (per unit q·area·slope) of a fin deflected by `d`, projected on the command. */
+  private finTorqueAlong(v: Vessel, fin: AeroFin, vp: Vector3, vt: number, d: number, cmd: ControlCommand): number {
+    _hn.crossVectors(fin.hinge, fin.normal);
+    _nd.copy(fin.normal).multiplyScalar(Math.cos(d)).addScaledVector(_hn, Math.sin(d));
+    const a = Math.asin(clamp(vp.dot(_nd) / Math.max(vt, 1e-6), -1, 1));
+    const aa = Math.abs(a);
+    const eff = aa < FIN_STALL_ANGLE ? Math.sin(aa) : Math.sin(FIN_STALL_ANGLE) * Math.max(0.4, 1 - (aa - FIN_STALL_ANGLE) * 0.8);
+    const lift = Math.sign(a) * eff;
+    // τ = r × F with F = −n′·lift
+    _tmp.copy(fin.pos).sub(v.com);
+    _rx.crossVectors(_tmp, _nd).multiplyScalar(-lift);
+    return _rx.x * cmd.x + _rx.y * cmd.y + _rx.z * cmd.z;
   }
 
   // ---------------------------------------------------------------------------
-  private applyAero(v: Vessel): void {
+  private applyAero(v: Vessel, cmd: ControlCommand): void {
     const rho = v.airDensity;
     _vAir.copy(v.airVelocity);
     _vAirL.copy(_vAir).applyQuaternion(_qInv);
@@ -578,12 +703,21 @@ export class VesselPhysics {
       _F.copy(_n).multiplyScalar(-mag / vn);
       this.addForceAt(_F, b.pos, com);
     }
-    // Fins
+    // Fins (all-moving control fins turn their normal about the hinge)
     for (const fin of v.aeroFins) {
       this.pointVelocity(fin.pos, com, w, _vp);
       const vt = _vp.length();
       if (vt < 0.1) continue;
-      const vperp = _vp.dot(fin.normal);
+      let normal = fin.normal;
+      if (fin.control > 0) {
+        const d = this.finDeflection(v, fin, _vp, vt, cmd);
+        fin.part.finDeflect = d;
+        if (d !== 0) {
+          _hn.crossVectors(fin.hinge, fin.normal);
+          normal = _nd.copy(fin.normal).multiplyScalar(Math.cos(d)).addScaledVector(_hn, Math.sin(d));
+        }
+      }
+      const vperp = _vp.dot(normal);
       let a = Math.asin(clamp(vperp / vt, -1, 1));
       const aa = Math.abs(a);
       let eff: number;
@@ -592,10 +726,21 @@ export class VesselPhysics {
       a = Math.sign(a) * eff;
       const qf = 0.5 * rho * vt * vt;
       const lift = qf * fin.area * FIN_LIFT_SLOPE * a * Math.min(mf, 1.3);
-      _F.copy(fin.normal).multiplyScalar(-lift);
+      _F.copy(normal).multiplyScalar(-lift);
       // fin drag
       _F.addScaledVector(_vp, (-qf * fin.area * 0.02 * mf) / vt);
       this.addForceAt(_F, fin.pos, com);
+    }
+    // Airbrakes: a flat plate swung into the flow
+    for (const p of v.parts) {
+      const b = p.def.airbrake;
+      if (!b || p.brakeDeploy <= 0 || p.destroyed || p.shielded) continue;
+      this.pointVelocity(p.position, com, w, _vp);
+      const vt = _vp.length();
+      if (vt < 0.1) continue;
+      const mag = 0.5 * rho * vt * vt * b.area * b.cd * p.brakeDeploy * Math.min(mf, 1.5);
+      _F.copy(_vp).multiplyScalar(-mag / vt);
+      this.addForceAt(_F, p.position, com);
     }
     // Parachutes
     for (const p of v.parts) {
@@ -615,7 +760,7 @@ export class VesselPhysics {
     v.aeroLoad = v.dynamicPressure * Math.sin(effA);
     const hasChuteOut = v.parts.some((p) => p.chuteState === 'full' || p.chuteState === 'semi');
     const stack = v.parts.length > 2 && !hasChuteOut && v.length > 6;
-    if (stack && v.aeroLoad > AERO_BREAKUP_LOAD && v.dynamicPressure > 12_000) {
+    if (stack && !this.cheats.indestructible && v.aeroLoad > AERO_BREAKUP_LOAD && v.dynamicPressure > 12_000) {
       // Destroy the part farthest from the COM (the structure snaps)
       let worst: FlightPart | null = null;
       let wd = -1;
@@ -646,7 +791,7 @@ export class VesselPhysics {
   private applyThermal(v: Vessel, dt: number): void {
     const speed = v.airVelocity.length();
     const rho = v.airDensity;
-    const flux = rho > 1e-10 && speed > 600 ? SUTTON_GRAVES_K * Math.sqrt(rho / Math.max(0.5, v.refRadius)) * speed * speed * speed : 0;
+    const flux = !this.cheats.noHeat && rho > 1e-10 && speed > 600 ? SUTTON_GRAVES_K * Math.sqrt(rho / Math.max(0.5, v.refRadius)) * speed * speed * speed : 0;
     v.heatFlux = flux;
     const ambient = rho > 1e-6 ? 250 : AMBIENT_TEMPERATURE_SPACE;
     // Direction of motion in the vessel frame
@@ -687,7 +832,8 @@ export class VesselPhysics {
       if (p.isEngine && p.thrust > 0) p.temperature = Math.max(p.temperature, 700 + 600 * p.engineThrottle);
       if (p.temperature < ambient) p.temperature += (ambient - p.temperature) * Math.min(1, dt * 0.01);
       if (p.temperature > p.def.maxTemp) {
-        this.destroyQueue.push({ vessel: v, part: p, reason: 'overheat', speed: 0 });
+        if (this.cheats.indestructible || this.cheats.noHeat) p.temperature = p.def.maxTemp;
+        else this.destroyQueue.push({ vessel: v, part: p, reason: 'overheat', speed: 0 });
       }
     }
   }
@@ -730,7 +876,7 @@ export class VesselPhysics {
       const vn = _vp.dot(_n);
       // Crash test on impact
       const tol = c.part.def.crashTolerance * (water ? 1.6 : 1) * (c.leg ? 1 : 1);
-      if (-vn > tol && !c.part.destroyed) {
+      if (-vn > tol && !c.part.destroyed && !this.cheats.indestructible) {
         this.destroyQueue.push({ vessel: v, part: c.part, reason: 'crash', speed: -vn });
       }
       // Explicit integration is only stable if a damping or friction force cannot
@@ -851,4 +997,42 @@ export class VesselPhysics {
       v.q.multiply(_dq).normalize();
     }
   }
+}
+
+/**
+ * Centre of pressure for the assembly building's engineer overlay. The vessel
+ * "flies" nose-first at angle of attack `alpha` in the plane of `axis` ('z'
+ * pitch plane or 'x' yaw plane) without rotating; the same normal-force terms as
+ * `applyAero` (nose lift, body crossflow, fins) are summed per unit dynamic
+ * pressure. Returns the lateral force coefficient (m²) and writes the centre of
+ * pressure's height along the vessel axis into `out.y`.
+ *
+ * Static stability: the rocket weathervanes nose-first only if this point lies
+ * BEHIND (below) the centre of mass.
+ */
+export function aeroCentre(v: Vessel, alpha: number, axis: 'x' | 'z', out: Vector3): number {
+  const vy = Math.cos(alpha);
+  const vs = Math.sin(alpha);
+  let F = 0;
+  let M = 0;
+  const add = (f: number, y: number) => {
+    F += f;
+    M += f * y;
+  };
+  for (const f of v.aeroFaces) {
+    if (f.facing !== 1 || f.liftArea <= 0) continue;
+    add(-f.liftArea * Math.sin(2 * Math.min(alpha, Math.PI / 4)), f.pos.y);
+  }
+  for (const b of v.aeroBody) add(-CROSSFLOW_CD * b.sideArea * vs * vs, b.pos.y);
+  for (const fin of v.aeroFins) {
+    const ns = axis === 'z' ? fin.normal.z : fin.normal.x;
+    const vperp = vy * fin.normal.y + vs * ns;
+    let a = Math.asin(clamp(vperp, -1, 1));
+    const aa = Math.abs(a);
+    const eff = aa < FIN_STALL_ANGLE ? Math.sin(aa) : Math.sin(FIN_STALL_ANGLE) * Math.max(0.4, 1 - (aa - FIN_STALL_ANGLE) * 0.8);
+    a = Math.sign(a) * eff;
+    add(-ns * fin.area * FIN_LIFT_SLOPE * a, fin.pos.y);
+  }
+  out.set(0, Math.abs(F) > 1e-9 ? M / F : v.com.y, 0);
+  return -F;
 }

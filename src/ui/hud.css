@@ -558,6 +558,25 @@
   flex-wrap: wrap;
   padding: 0 12px 10px;
 }
+.hud .agrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 0 12px 10px;
+}
+.hud .agrow .ag-l {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 4px;
+}
+.hud .agrow .ag {
+  min-width: 26px;
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+}
 .hud .ap {
   padding: 8px 12px 10px;
 }

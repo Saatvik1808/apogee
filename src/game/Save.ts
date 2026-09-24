@@ -60,6 +60,8 @@ export interface CampaignProgress {
 export interface SaveData {
   version: 1;
   crafts: CraftData[];
+  /** Reusable part groups saved from the assembly building (boosters, landers, satellites). */
+  subassemblies: CraftData[];
   campaign: CampaignProgress;
   settings: Settings;
   lastCraft: string | null;
@@ -71,6 +73,7 @@ export function defaultSave(): SaveData {
   return {
     version: 1,
     crafts: [],
+    subassemblies: [],
     campaign: { ut: 0, vessels: [], completed: [], scores: {}, funds: 0, storySeen: [] },
     settings: {
       quality: 'high',
@@ -120,6 +123,7 @@ export function loadSave(): SaveData {
     return {
       version: 1,
       crafts: Array.isArray(d.crafts) ? d.crafts : [],
+      subassemblies: Array.isArray(d.subassemblies) ? d.subassemblies : [],
       campaign,
       settings: { ...base.settings, ...(d.settings ?? {}) },
       lastCraft: d.lastCraft ?? null,

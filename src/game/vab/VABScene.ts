@@ -13,11 +13,19 @@
  * uid it belongs to. Attach points are small glowing rings at the free stack
  * nodes, and a translucent "ghost" previews where a held part will go.
  *
+ * The engineer's overlay draws the three points every rocket designer watches:
+ * the centre of MASS (yellow, with a hollow marker where it moves as the tanks
+ * empty), the centre of LIFT/pressure (cyan) and the centre of THRUST (magenta,
+ * with an arrow along the thrust line). Markers ignore the depth buffer so they
+ * show through the hull.
+ *
  * Key concepts: image-based lighting (IBL), PMREM, raycasting and picking,
- * scene graphs from data, preview/ghost rendering
+ * scene graphs from data, preview/ghost rendering, CoM / CoL / CoT
  */
 import {
   AdditiveBlending,
+  ArrowHelper,
+  BufferGeometry as BufferGeometryImpl,
   CircleGeometry,
   Color,
   DirectionalLight,
@@ -40,6 +48,8 @@ import {
   SphereGeometry,
   SRGBColorSpace,
   Texture,
+  TorusGeometry,
+  CylinderGeometry,
   Vector2,
   Vector3,
   type BufferGeometry,
@@ -50,6 +60,19 @@ import type { CraftData, CraftPart, PartLayout } from '../../parts/Craft';
 import { craftBounds, layoutCraft } from '../../parts/Craft';
 import type { GameAssets } from '../../render/Assets';
 import { buildInterstage, buildPartVisual, disposeObject } from '../../render/vessel/PartMeshes';
+
+/** Engineer overlay data (vessel frame). */
+export interface EngineerInfo {
+  com: Vector3;
+  comDry: Vector3;
+  col: Vector3 | null;
+  cot: Vector3 | null;
+  cotDir: Vector3;
+  /** Marker radius (m). */
+  size: number;
+  /** CoM − CoL along the axis (m): positive = aerodynamically stable. */
+  margin: number | null;
+}
 
 export interface AttachNode {
   /** Parent part uid (-1: becomes the root). */
@@ -83,6 +106,16 @@ export class VABScene {
   private readonly ghostGroup = new Group();
   private readonly nodeGroup = new Group();
   private readonly highlightGroup = new Group();
+  private readonly engGroup = new Group();
+  private readonly engMats = {
+    com: new MeshBasicMaterial({ color: new Color(2.2, 1.8, 0.2), depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 }),
+    comRing: new MeshBasicMaterial({ color: new Color(0.05, 0.05, 0.05), depthTest: false, depthWrite: false, transparent: true, opacity: 0.9 }),
+    dry: new MeshBasicMaterial({ color: new Color(1.4, 1.2, 0.3), depthTest: false, depthWrite: false, transparent: true, opacity: 0.8, wireframe: true }),
+    col: new MeshBasicMaterial({ color: new Color(0.2, 1.6, 2.4), depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 }),
+    cot: new MeshBasicMaterial({ color: new Color(2.2, 0.35, 1.9), depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 }),
+    good: new MeshBasicMaterial({ color: new Color(0.4, 2.0, 0.8), depthTest: false, depthWrite: false, transparent: true, opacity: 0.75 }),
+    bad: new MeshBasicMaterial({ color: new Color(2.4, 0.5, 0.35), depthTest: false, depthWrite: false, transparent: true, opacity: 0.75 }),
+  };
   private readonly key: DirectionalLight;
   private readonly renderer: WebGLRenderer;
   private envTex: Texture | null = null;
@@ -192,6 +225,7 @@ export class VABScene {
 
     s.add(this.craftGroup, this.ghostGroup, this.nodeGroup, this.highlightGroup);
     this.nodeGroup.renderOrder = 50;
+    this.craftGroup.add(this.engGroup);
   }
 
   /** Rebuild every part mesh from the craft. */
@@ -292,7 +326,8 @@ export class VABScene {
       return out;
     }
     for (const l of this.layout.values()) {
-      if (l.part.attach === 'radial') continue;
+      // Radially mounted parts get stack nodes too (nose cones on boosters, tanks
+      // stacked on outriggers); parts that cannot stack have no nodes anyway
       const { above, below } = stackNeighbors(c, l.part);
       const up = _v.set(0, 1, 0).applyQuaternion(l.rotation);
       const node = (sign: number) => l.position.clone().addScaledVector(up, (sign * l.stats.height) / 2).add(this.craftGroup.position);
@@ -392,6 +427,57 @@ export class VABScene {
     if (hovered !== null && !selected.includes(hovered)) add(hovered, this.hoverMat);
   }
 
+  /** Show (or with null, hide) the CoM / CoL / CoT markers. */
+  setEngineer(info: EngineerInfo | null): void {
+    for (const ch of [...this.engGroup.children]) {
+      this.engGroup.remove(ch);
+      ch.traverse((o) => {
+        const m = o as Mesh;
+        if (m.geometry) m.geometry.dispose();
+        // ArrowHelper owns its materials; the shared marker materials are kept
+        if (o.userData.ownMaterial && m.material) (m.material as Material).dispose();
+      });
+    }
+    if (!info) return;
+    const r = info.size;
+    const mark = (geo: BufferGeometryImpl, mat: Material, pos: Vector3) => {
+      const m = new Mesh(geo, mat);
+      m.position.copy(pos);
+      m.renderOrder = 70;
+      this.engGroup.add(m);
+      return m;
+    };
+    mark(new SphereGeometry(r, 20, 14), this.engMats.com, info.com);
+    const ring = mark(new TorusGeometry(r * 1.02, r * 0.18, 8, 28), this.engMats.comRing, info.com);
+    ring.rotation.x = Math.PI / 2;
+    if (info.comDry.distanceTo(info.com) > r * 0.5) mark(new SphereGeometry(r * 0.75, 12, 8), this.engMats.dry, info.comDry);
+    if (info.col) {
+      const cp = new Vector3(info.com.x, info.col.y, info.com.z);
+      mark(new SphereGeometry(r * 0.85, 18, 12), this.engMats.col, cp);
+      // Bar from CoM to CoL: green when the lift acts behind the mass (stable)
+      const len = Math.abs(info.com.y - cp.y);
+      if (len > r) {
+        const bar = mark(new CylinderGeometry(r * 0.16, r * 0.16, len, 8), info.margin !== null && info.margin > 0 ? this.engMats.good : this.engMats.bad, new Vector3(info.com.x, (info.com.y + cp.y) / 2, info.com.z));
+        bar.renderOrder = 69;
+      }
+    }
+    if (info.cot) {
+      mark(new SphereGeometry(r * 0.8, 16, 10), this.engMats.cot, info.cot);
+      const arrow = new ArrowHelper(info.cotDir.clone().normalize(), info.cot, r * 9, 0xff4fe0, r * 2.4, r * 1.3);
+      arrow.traverse((o) => {
+        o.renderOrder = 70;
+        o.userData.ownMaterial = true;
+        const m = o as Mesh;
+        if (m.material) {
+          const mat = m.material as MeshBasicMaterial;
+          mat.depthTest = false;
+          mat.transparent = true;
+        }
+      });
+      this.engGroup.add(arrow);
+    }
+  }
+
   /** World position of a craft-frame point. */
   toWorld(p: Vector3, out: Vector3): Vector3 {
     return out.copy(p).add(this.craftGroup.position);
@@ -414,6 +500,8 @@ export class VABScene {
   dispose(): void {
     for (const o of this.partObjects.values()) disposeObject(o);
     this.setGhost(null, []);
+    this.setEngineer(null);
+    for (const m of Object.values(this.engMats)) m.dispose();
     this.showNodes([], null, 1);
     // The PMREM environment (≈6 MB) and the 2048² shadow map (≈32 MB) are
     // per-visit GPU allocations: free them, or every trip to the hangar leaks them

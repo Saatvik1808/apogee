@@ -50,7 +50,7 @@ export class App {
   private readonly hintEl: HTMLDivElement;
   private hintTimer = 0;
   private unbackPause: (() => void) | null = null;
-  private pauseView: 'menu' | 'settings' | 'result' | null = null;
+  private pauseView: 'menu' | 'settings' | 'cheats' | 'result' | null = null;
 
   constructor(ctx: GameContext) {
     this.ctx = ctx;
@@ -85,7 +85,7 @@ export class App {
   private armBack(): void {
     if (this.unbackPause) return;
     this.unbackPause = this.ctx.platform.pushBack(() => {
-      if (this.pauseView === 'settings' && this.state instanceof FlightState) this.showPauseMenu(this.state);
+      if ((this.pauseView === 'settings' || this.pauseView === 'cheats') && this.state instanceof FlightState) this.showPauseMenu(this.state);
       else this.hidePause();
       return true;
     });
@@ -117,7 +117,9 @@ export class App {
       requestAnimationFrame(this.frame);
       return;
     }
-    const raw = (now - this.last) / 1000;
+    // Never let time run backwards (a timestamp from before the last frame would
+    // drain the physics accumulator and freeze the simulation)
+    const raw = Math.max(0, (now - this.last) / 1000);
     const dt = Math.min(0.1, raw);
     this.last = now;
     resolution.frame(this.ctx, raw, cap);
@@ -181,7 +183,7 @@ export class App {
       new VABState(this.ctx, {
         mission,
         craft,
-        onLaunch: (c, siteId, tod) => this.launch({ craft: c, site: getLaunchSite(siteId), timeOfDay: tod, mission, orbit: 'pad', resume: null }),
+        onLaunch: (c, siteId, tod, orbit) => this.launch({ craft: c, site: getLaunchSite(siteId), timeOfDay: tod, mission, orbit: mission ? 'pad' : orbit, resume: null }),
         onExit: () => this.openMenu(),
       }),
     );
@@ -346,6 +348,7 @@ export class App {
         h('div', { class: 'modal-actions col' },
           h('button', { class: 'btn primary', text: 'Resume', onClick: () => this.hidePause() }),
           h('button', { class: 'btn', text: 'Settings', onClick: () => this.showPauseSettings(fs) }),
+          req && !req.mission ? h('button', { class: 'btn', text: 'Sandbox cheats', onClick: () => this.showPauseCheats(fs) }) : null,
           h('button', { class: 'btn', text: 'Revert to launch', onClick: () => this.revert() }),
           h('button', { class: 'btn', text: 'Back to assembly', onClick: () => req && this.openVAB(req.mission, req.craft) }),
           h('button', { class: 'btn', text: 'Main menu', onClick: () => this.openMenu() }),
@@ -353,6 +356,73 @@ export class App {
       ),
     );
     this.pauseEl.style.display = '';
+  }
+
+  /**
+   * Sandbox cheats (never in campaign missions): infinite propellant, no damage,
+   * no re-entry heating, and "set orbit" — teleport the active vessel into a
+   * circular orbit around Earth, the Moon or Mars to test a design where it will fly.
+   */
+  private showPauseCheats(fs: FlightState): void {
+    clear(this.pauseEl);
+    this.pauseView = 'cheats';
+    const ch = fs.sim.physics.cheats;
+    const row = (label: string, sub: string, get: () => boolean, set: (v: boolean) => void) => {
+      const btn = h('button', { class: `btn small${get() ? ' active' : ''}`, text: get() ? 'On' : 'Off' });
+      btn.addEventListener('click', () => {
+        set(!get());
+        btn.classList.toggle('active', get());
+        btn.textContent = get() ? 'On' : 'Off';
+      });
+      return h('div', { class: 'cheat-row' }, h('div', {}, h('div', { class: 'cheat-t', text: label }), h('div', { class: 'cheat-s', text: sub })), btn);
+    };
+    let body: 'earth' | 'moon' | 'mars' = fs.sim.active.body.id === 'moon' || fs.sim.active.body.id === 'mars' ? fs.sim.active.body.id : 'earth';
+    const defaults: Record<'earth' | 'moon' | 'mars', number> = { earth: 250, moon: 100, mars: 300 };
+    const alt = h('input', { type: 'number', value: String(defaults[body]), attrs: { min: '10', max: '400000', step: '10' } });
+    const inc = h('input', { type: 'number', value: '0', attrs: { min: '0', max: '180', step: '1' } });
+    const bodySeg = h('div', { class: 'seg-ctl' });
+    const drawBodies = () => {
+      clear(bodySeg);
+      for (const [id, label] of [['earth', 'Earth'], ['moon', 'Moon'], ['mars', 'Mars']] as const) {
+        bodySeg.appendChild(h('button', {
+          class: `btn small${id === body ? ' active' : ''}`,
+          text: label,
+          onClick: () => {
+            body = id;
+            alt.value = String(defaults[id]);
+            drawBodies();
+          },
+        }));
+      }
+    };
+    drawBodies();
+    const note = h('div', { class: 'cheat-s', text: '' });
+    this.pauseEl.appendChild(
+      h('div', { class: 'modal card modal-cheats' },
+        h('div', { class: 'mp-h' }, h('span', { text: 'Sandbox cheats' }), h('button', { class: 'btn ghost small', text: '← Back', onClick: () => this.showPauseMenu(fs) })),
+        row('Infinite propellant', 'Tanks, solid grains and RCS never run dry; unlimited restarts', () => ch.infiniteFuel, (v) => (ch.infiniteFuel = v)),
+        row('Indestructible', 'No crash, overheat or aerodynamic break-up damage', () => ch.indestructible, (v) => (ch.indestructible = v)),
+        row('No re-entry heating', 'Skins stay cool at any speed', () => ch.noHeat, (v) => (ch.noHeat = v)),
+        h('div', { class: 'ql-label', text: 'Set orbit' }),
+        bodySeg,
+        h('div', { class: 'cheat-orbit' },
+          h('label', {}, h('span', { text: 'Altitude (km)' }), alt),
+          h('label', {}, h('span', { text: 'Inclination (°)' }), inc),
+        ),
+        note,
+        h('div', { class: 'modal-actions' },
+          h('button', {
+            class: 'btn primary',
+            text: 'Teleport',
+            onClick: () => {
+              const res = fs.teleport(body, Number(alt.value), Number(inc.value));
+              if (res) note.textContent = res;
+              else this.hidePause();
+            },
+          }),
+        ),
+      ),
+    );
   }
 
   private showPauseSettings(fs: FlightState): void {

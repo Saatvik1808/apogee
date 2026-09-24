@@ -10,11 +10,18 @@
  * Engine bells follow a parabolic "bell" contour from a narrow throat to the exit;
  * clusters place one bell per nozzle offset. Vacuum engines get a dark niobium
  * extension that glows red-hot when firing. Mechanisms (legs, solar arrays,
- * parachutes, fairing halves) are built as separate child objects so the flight
- * renderer can animate them.
+ * parachutes, fairing halves, control fins, airbrake flaps) are built as separate
+ * child objects — pivots placed on their hinge lines — so the flight renderer can
+ * animate them by setting one rotation.
+ *
+ * An aerospike turns the bell inside out: the exhaust expands along a central
+ * spike with the outside air as its outer wall, which is why it keeps its
+ * efficiency at every altitude. A truss is dozens of struts, so it is merged into
+ * ONE geometry (one draw call instead of hundreds).
  *
  * Key concepts: lathe (revolution) geometry, parametric modelling, ogive curves,
- * bell nozzles, scene-graph hierarchies for animation
+ * bell nozzles, plug nozzles, scene-graph hierarchies for animation, geometry
+ * merging
  */
 import {
   BoxGeometry,
@@ -37,6 +44,7 @@ import {
   Color,
   type Material,
 } from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { clusterLayout, type PartConfig, type PartDef, type PartStats } from '../../parts/PartCatalog';
 import { PROPELLANTS } from '../../parts/Propellants';
 import { MAT, tankMaterial } from './Materials';
@@ -62,6 +70,8 @@ export interface PartVisual {
   legs: Array<{ strut: Object3D; foot: Object3D; length: number; height: number }>;
   solar: Object3D[];
   fairingShell: Group | null;
+  /** Hinged parts: all-moving fins (rotate about x) and airbrake flaps (rotate about z). */
+  movers: Array<{ obj: Object3D; kind: 'fin' | 'brake' }>;
 }
 
 export interface BuildContext {
@@ -192,6 +202,31 @@ function bell(re: number, length: number, vacuum: boolean, nozzleMat: Material, 
   return gr;
 }
 
+/** Linear-aerospike style plug: a ring of combustors feeding a concave spike. */
+function spike(re: number, length: number, glowMat: MeshStandardMaterial): Group {
+  const gr = new Group();
+  const N = 14;
+  const pts: Array<[number, number]> = [[re * 0.2, 0], [re * 1.02, -length * 0.04], [re, -length * 0.1]];
+  for (let i = 1; i <= N; i++) {
+    const s = i / N;
+    // Concave isentropic-ramp contour, truncated at a third of the radius
+    pts.push([re * (1 - 0.66 * Math.pow(s, 0.7)), -length * (0.1 + 0.9 * s)]);
+  }
+  pts.push([0.0001, -length]);
+  gr.add(lathe(pts, 40, MAT.nozzleOuter()));
+  // Combustor ring around the top of the ramp
+  const ring = new Mesh(new TorusGeometry(re * 0.98, re * 0.09, 10, 40), MAT.darkMetal());
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = -length * 0.05;
+  ring.castShadow = true;
+  gr.add(ring);
+  // Glowing throat band where the exhaust leaves the combustors
+  const band = new Mesh(new CylinderGeometry(re * 1.0, re * 0.94, length * 0.08, 40, 1, true), glowMat);
+  band.position.y = -length * 0.13;
+  gr.add(band);
+  return gr;
+}
+
 function buildEngine(def: PartDef, stats: PartStats, cfg: PartConfig, ctx: BuildContext, g: Group, vis: PartVisual): void {
   const e = def.engine!;
   const h = stats.height;
@@ -217,6 +252,45 @@ function buildEngine(def: PartDef, stats: PartStats, cfg: PartConfig, ctx: Build
   if (extMat) vis.hotMaterials.push(extMat);
   const chambers = e.chambers;
   const len = e.length;
+  if (e.style === 'spike') {
+    for (const [ox, oz] of lay.offsets) {
+      const re = e.nozzleExit / 2;
+      const sp = spike(re, len, glowMat);
+      sp.position.set(ox, topY - mountH, oz);
+      g.add(sp);
+      vis.nozzles.push({ exit: new Vector3(ox, topY - mountH - len * 0.7, oz), exitRadius: re * 0.85, throat: new Vector3(ox, topY - mountH - len * 0.1, oz) });
+    }
+    return;
+  }
+  if (e.style === 'nuclear') {
+    // Reactor drum with a radiation shield on top, then a regeneratively cooled bell
+    const reactorL = len * 0.34;
+    const re = e.nozzleExit / 2;
+    for (const [ox, oz] of lay.offsets) {
+      const top = topY - mountH;
+      const shield = cyl(re * 0.95, re * 0.95, reactorL * 0.12, MAT.grayPaint(), 32);
+      shield.position.set(ox, top - reactorL * 0.06, oz);
+      g.add(shield);
+      const core = cyl(re * 0.62, re * 0.7, reactorL * 0.88, MAT.darkMetal(), 32);
+      core.position.set(ox, top - reactorL * 0.56, oz);
+      g.add(core);
+      const stripe = cyl(re * 0.705, re * 0.705, reactorL * 0.12, MAT.hazard(), 32, true);
+      stripe.position.set(ox, top - reactorL * 0.45, oz);
+      g.add(stripe);
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2;
+        const rib = box(0.08, reactorL * 0.8, re * 0.25, MAT.aluminum());
+        rib.position.set(ox + Math.cos(a) * re * 0.72, top - reactorL * 0.56, oz + Math.sin(a) * re * 0.72);
+        rib.rotation.y = -a;
+        g.add(rib);
+      }
+      const b = bell(re, len - reactorL, vacuum, MAT.nozzleOuter(), extMat, glowMat);
+      b.position.set(ox, top - reactorL, oz);
+      g.add(b);
+      vis.nozzles.push({ exit: new Vector3(ox, top - len, oz), exitRadius: re, throat: new Vector3(ox, top - reactorL - (len - reactorL) * 0.2, oz) });
+    }
+    return;
+  }
   for (const [ox, oz] of lay.offsets) {
     for (let c = 0; c < chambers; c++) {
       const cx = ox + (chambers > 1 ? (c - (chambers - 1) / 2) * e.nozzleExit * 0.52 : 0);
@@ -438,20 +512,136 @@ export function buildFairingHalf(diameter: number, length: number, side: 1 | -1)
   return m;
 }
 
-function buildFin(def: PartDef, g: Group): void {
+function buildFin(def: PartDef, g: Group, vis: PartVisual): void {
   const f = def.fin!;
   const s = new Shape();
   const c = f.chord;
-  s.moveTo(0, -c / 2);
-  s.lineTo(f.span, -c / 2 - c * 0.05);
-  s.lineTo(f.span, -c / 2 + c * 0.35);
-  s.lineTo(0, c / 2);
-  s.lineTo(0, -c / 2);
-  const geo = new ExtrudeGeometry(s, { depth: 0.06 + f.span * 0.02, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 1 });
-  geo.translate(0, 0, -(0.06 + f.span * 0.02) / 2);
-  const m = new Mesh(geo, MAT.whitePaint());
+  const moving = (f.control ?? 0) > 0;
+  if (moving) {
+    // All-moving surface: a clipped delta pivoting about its mid-chord shaft
+    const x0 = 0.12;
+    s.moveTo(x0, -c * 0.45);
+    s.lineTo(f.span, -c * 0.32);
+    s.lineTo(f.span, c * 0.12);
+    s.lineTo(x0, c * 0.5);
+    s.lineTo(x0, -c * 0.45);
+  } else {
+    s.moveTo(0, -c / 2);
+    s.lineTo(f.span, -c / 2 - c * 0.05);
+    s.lineTo(f.span, -c / 2 + c * 0.35);
+    s.lineTo(0, c / 2);
+    s.lineTo(0, -c / 2);
+  }
+  const t = 0.06 + f.span * 0.02;
+  const geo = new ExtrudeGeometry(s, { depth: t, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 1 });
+  geo.translate(0, 0, -t / 2);
+  const m = new Mesh(geo, moving ? MAT.grayPaint() : MAT.whitePaint());
   m.castShadow = true;
-  g.add(m);
+  if (!moving) {
+    g.add(m);
+    return;
+  }
+  // Actuator housing on the body, shaft along the span, surface on a pivot
+  const housing = box(0.14, c * 0.4, t * 2.4, MAT.darkMetal());
+  housing.position.x = 0.05;
+  g.add(housing);
+  const shaft = cyl(0.03 + t * 0.2, 0.03 + t * 0.2, f.span * 0.35, MAT.aluminum(), 10);
+  shaft.rotation.z = Math.PI / 2;
+  shaft.position.x = 0.12 + f.span * 0.12;
+  const pivot = new Group();
+  pivot.add(m, shaft);
+  g.add(pivot);
+  vis.movers.push({ obj: pivot, kind: 'fin' });
+}
+
+/** Airbrake: a base plate on the hull and a flap hinged at its top edge. */
+function buildAirbrake(def: PartDef, g: Group, vis: PartVisual): void {
+  const h = def.height;
+  const w = 0.62;
+  const base = box(0.06, h * 1.04, w * 1.04, MAT.darkMetal());
+  g.add(base);
+  const flap = box(0.05, h, w, MAT.aluminum());
+  flap.position.set(0.03, -h / 2, 0);
+  const stripe = box(0.052, h * 0.18, w * 1.001, MAT.hazard());
+  stripe.position.set(0.03, -h * 0.9, 0);
+  const pivot = new Group();
+  pivot.position.set(0.05, h / 2, 0);
+  pivot.add(flap, stripe);
+  // Actuator strut (stretches visually with the flap)
+  const strut = cyl(0.025, 0.025, h * 0.45, MAT.aluminum(), 8);
+  strut.position.set(0.05, -h * 0.35, 0);
+  pivot.add(strut);
+  g.add(pivot);
+  vis.movers.push({ obj: pivot, kind: 'brake' });
+}
+
+/** Open lattice girder: four longerons, a frame and a diagonal per face every bay — merged into one mesh. */
+function buildTruss(stats: PartStats, g: Group): void {
+  const d = stats.diameterTop;
+  const L = stats.height;
+  const half = d * 0.36;
+  const bar = Math.max(0.03, d * 0.045);
+  const bays = Math.max(1, Math.min(24, Math.round(L / (d * 0.9))));
+  const bay = L / bays;
+  const parts: BufferGeometry[] = [];
+  const strut = (a: Vector3, b: Vector3) => {
+    const len = a.distanceTo(b);
+    const geo = new BoxGeometry(bar, len, bar);
+    const o = new Object3D();
+    o.position.copy(a).add(b).multiplyScalar(0.5);
+    o.quaternion.setFromUnitVectors(new Vector3(0, 1, 0), b.clone().sub(a).normalize());
+    o.updateMatrix();
+    geo.applyMatrix4(o.matrix);
+    parts.push(geo);
+  };
+  const corners: Array<[number, number]> = [[half, half], [-half, half], [-half, -half], [half, -half]];
+  for (const [x, z] of corners) strut(new Vector3(x, -L / 2, z), new Vector3(x, L / 2, z));
+  for (let i = 0; i <= bays; i++) {
+    const y = -L / 2 + i * bay;
+    for (let k = 0; k < 4; k++) {
+      const [x0, z0] = corners[k]!;
+      const [x1, z1] = corners[(k + 1) % 4]!;
+      strut(new Vector3(x0, y, z0), new Vector3(x1, y, z1));
+      if (i < bays) strut(new Vector3(x0, y, z0), new Vector3(x1, y + bay, z1));
+    }
+  }
+  // End plates so it stacks cleanly
+  for (const y of [-L / 2 + 0.03, L / 2 - 0.03]) {
+    const plate = new CylinderGeometry(d / 2, d / 2, 0.06, segs(d / 2));
+    plate.translate(0, y, 0);
+    parts.push(plate);
+  }
+  const merged = mergeGeometries(parts.map((p) => (p.index ? p.toNonIndexed() : p)), false);
+  for (const p of parts) p.dispose();
+  if (!merged) return;
+  const mesh = new Mesh(merged, MAT.grayPaint());
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  g.add(mesh);
+}
+
+/** Crew cabin: a white pressure hull with a ring of windows and a side hatch. */
+function buildCabin(stats: PartStats, g: Group): void {
+  const r = stats.diameterTop / 2;
+  const h = stats.height;
+  g.add(lathe([[0, -h / 2], [r * 0.97, -h / 2], [r, -h / 2 + 0.08], [r, h / 2 - 0.08], [r * 0.97, h / 2], [0, h / 2]], segs(r), MAT.whitePaint()));
+  for (const y of [-h / 2 + 0.12, h / 2 - 0.12]) {
+    const ring = cyl(r * 1.01, r * 1.01, 0.14, MAT.darkMetal(), segs(r), true);
+    ring.position.y = y;
+    g.add(ring);
+  }
+  const n = Math.max(6, Math.round(r * 5));
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + 0.3;
+    const w = box(0.34, 0.46, 0.04, MAT.window());
+    w.position.set(Math.cos(a) * (r + 0.005), h * 0.12, Math.sin(a) * (r + 0.005));
+    w.lookAt(new Vector3(Math.cos(a) * r * 2, h * 0.12, Math.sin(a) * r * 2));
+    g.add(w);
+  }
+  const hatch = box(0.9, 1.1, 0.06, MAT.grayPaint());
+  hatch.position.set(Math.cos(Math.PI) * (r + 0.01), -h * 0.12, 0);
+  hatch.lookAt(new Vector3(-r * 2, -h * 0.12, 0));
+  g.add(hatch);
 }
 
 function buildHeatshield(stats: PartStats, g: Group, vis: PartVisual): void {
@@ -608,7 +798,7 @@ function buildSolar(g: Group, vis: PartVisual): void {
 export function buildPartVisual(def: PartDef, stats: PartStats, cfg: PartConfig, ctx: BuildContext): PartVisual {
   const g = new Group();
   g.name = def.id;
-  const vis: PartVisual = { root: g, nozzles: [], glow: [], heat: [], hotMaterials: [], canopy: null, legs: [], solar: [], fairingShell: null };
+  const vis: PartVisual = { root: g, nozzles: [], glow: [], heat: [], hotMaterials: [], canopy: null, legs: [], solar: [], fairingShell: null, movers: [] };
   switch (def.shape) {
     case 'tank':
       buildTank(stats, cfg, g);
@@ -647,7 +837,16 @@ export function buildPartVisual(def: PartDef, stats: PartStats, cfg: PartConfig,
       buildFairing(stats, cfg, g, vis);
       break;
     case 'fin':
-      buildFin(def, g);
+      buildFin(def, g, vis);
+      break;
+    case 'airbrake':
+      buildAirbrake(def, g, vis);
+      break;
+    case 'truss':
+      buildTruss(stats, g);
+      break;
+    case 'cabin':
+      buildCabin(stats, g);
       break;
     case 'heatshield':
       buildHeatshield(stats, g, vis);

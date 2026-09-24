@@ -113,7 +113,8 @@ export function vesselFromSnapshot(s: VesselSnapshot, body: CelestialBody): Vess
     p.legDeploy = st.legDeploy;
     p.solarDeploy = st.solar;
     p.engineIgnited = st.ignited;
-    p.ignitionsLeft = st.ignitions;
+    // JSON has no Infinity: unlimited-restart engines come back as null
+    p.ignitionsLeft = typeof st.ignitions === 'number' ? st.ignitions : Infinity;
     p.flameout = st.flameout;
     p.fairingAttached = st.fairing && !!p.def.fairing;
     p.vesselName = st.vesselName;

@@ -42,7 +42,10 @@ export type PartShape =
   | 'tube'
   | 'solar'
   | 'dock'
-  | 'rcs';
+  | 'rcs'
+  | 'cabin'
+  | 'airbrake'
+  | 'truss';
 
 export type PlumeStyle = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'solid';
 
@@ -69,6 +72,8 @@ export interface EngineSpec {
   chambers: number;
   plume: PlumeStyle;
   cost: number;
+  /** Nozzle geometry: bell (default), linear aerospike, or nuclear-thermal (reactor + bell). */
+  style?: 'bell' | 'spike' | 'nuclear';
 }
 
 export interface SolidSpec {
@@ -102,6 +107,10 @@ export interface PartConfigSchema {
   cluster?: number[];
   thrustLimit?: boolean;
   canopies?: number[];
+  /** Partial propellant load (0–100 %). */
+  fill?: boolean;
+  /** Decoupler: propellant may flow across it (asparagus / onion staging). */
+  crossfeed?: boolean;
 }
 
 export interface PartDef {
@@ -133,7 +142,12 @@ export interface PartDef {
   parachute?: ParachuteSpec;
   heatShield?: { ablatorPerM2: number };
   legs?: { length: number };
-  fin?: { area: number; span: number; chord: number };
+  /** `control`: maximum deflection (rad) of a movable fin (control surface). */
+  fin?: { area: number; span: number; chord: number; control?: number };
+  /** Deployable drag plate: flat-plate area (m²) and drag coefficient when open. */
+  airbrake?: { area: number; cd: number };
+  /** Passenger cabin (crew but no controls). */
+  cabin?: { crew: number };
   reactionWheel?: { torquePerM2: number };
   fairing?: boolean;
   /** Androgynous docking ring: two free faces that meet slowly latch the vessels together. */
@@ -152,9 +166,23 @@ export interface PartConfig {
   cluster?: number;
   thrustLimit?: number;
   canopies?: number;
+  /** Fraction of the propellant capacity loaded at launch (default 1). */
+  fill?: number;
+  /** Engine gimbal locked (fixed nozzle). */
+  gimbalLock?: boolean;
+  /** Parachute: altitude above the ground (m) at which it opens fully. */
+  deployAlt?: number;
+  /** Action groups (1–10) this part responds to. */
+  groups?: number[];
+  /** Decoupler: let propellant flow across it; the far side drains first. */
+  crossfeed?: boolean;
+  /** Placement tweak: translation (m) in the attach frame (radial parts: x out, y along the parent axis, z around it). */
+  offset?: [number, number, number];
+  /** Placement tweak: rotation (degrees) about the part's own x, y and z axes. */
+  rot?: [number, number, number];
 }
 
-const SIZES = [1.25, 2.5, 3.75, 5, 7.5, 10];
+const SIZES = [0.625, 1.25, 2.5, 3.75, 5, 7.5, 10];
 
 function engine(
   id: string,
@@ -168,7 +196,7 @@ function engine(
     ...e,
     chambers: e.chambers ?? 1,
     spool: e.spool ?? 0.6,
-    plume: e.propellant === 'monoprop' || e.propellant === 'solid' ? 'hypergolic' : e.propellant,
+    plume: e.propellant === 'monoprop' || e.propellant === 'solid' ? 'hypergolic' : e.propellant === 'lh2' ? 'hydrolox' : e.propellant,
   };
   return {
     id,
@@ -212,6 +240,45 @@ export const PART_DEFS: PartDef[] = [
     allowRadialChildren: true,
     command: { crew: 0, torque: 2_500 },
     tier: 0,
+  },
+  {
+    id: 'probe-mite',
+    name: 'Mite Probe Core',
+    category: 'command',
+    shape: 'probe',
+    description: 'Tiny 0.625 m avionics puck for micro-satellites, landers and test vehicles. Can also be mounted on the side of a stack.',
+    cost: 450_000,
+    diameter: 0.625,
+    height: 0.3,
+    dryMass: 40,
+    crashTolerance: 12,
+    maxTemp: 1400,
+    stackTop: true,
+    stackBottom: true,
+    radialMount: true,
+    allowRadialChildren: true,
+    command: { crew: 0, torque: 450 },
+    tier: 0,
+  },
+  {
+    id: 'capsule-swift',
+    name: 'Swift Capsule',
+    category: 'command',
+    shape: 'capsule',
+    description: 'One-seat capsule in the spirit of Mercury: light enough for a small launcher. Needs a heat shield and a parachute to come home.',
+    cost: 12_000_000,
+    diameter: 0.7,
+    diameterBottom: 1.25,
+    height: 1.9,
+    dryMass: 1_350,
+    crashTolerance: 14,
+    maxTemp: 1850,
+    stackTop: true,
+    stackBottom: true,
+    radialMount: false,
+    allowRadialChildren: true,
+    command: { crew: 1, torque: 5_000 },
+    tier: 1,
   },
   {
     id: 'ring-atlas',
@@ -291,9 +358,9 @@ export const PART_DEFS: PartDef[] = [
     stackBottom: true,
     radialMount: true,
     allowRadialChildren: true,
-    configurable: { length: [Math.max(0.5, d * 0.4), d * 9, d < 3 ? 0.25 : 0.5], propellant: true },
+    configurable: { length: [Math.max(0.5, d * 0.4), d * 9, d < 3 ? 0.25 : 0.5], propellant: true, fill: true },
     tank: { fillFactor: 0.92 },
-    tier: i < 2 ? 0 : i < 4 ? 2 : 3,
+    tier: d <= 2.5 ? 0 : d <= 5 ? 2 : 3,
   })),
 
   // --------------------------------------------------------------- ENGINES
@@ -353,6 +420,22 @@ export const PART_DEFS: PartDef[] = [
     propellant: 'hypergolic', thrustVac: 16_000, ispVac: 311, ispSL: 170, gimbal: 0, minThrottle: 1,
     ignitions: 10, nozzleExit: 0.9, length: 1.3, mass: 90, cost: 5_000_000,
   }, [1, 2], 3),
+  engine('eng-gnat', 'Gnat-2', 'Micro hypergolic engine for 0.625 m stacks: probes, kick stages and small landers. Deep throttling and plenty of restarts.', {
+    propellant: 'hypergolic', thrustVac: 18_000, ispVac: 318, ispSL: 250, gimbal: 4 * DEG, minThrottle: 0.1,
+    ignitions: 25, nozzleExit: 0.42, length: 0.75, mass: 55, cost: 700_000,
+  }, [1, 2, 3, 4], 1),
+  engine('eng-puff', 'Puff Thruster', 'Monopropellant hydrazine thruster. Weak and thirsty, but it drinks the same tanks as the RCS and never runs out of restarts.', {
+    propellant: 'monoprop', thrustVac: 9_000, ispVac: 235, ispSL: 120, gimbal: 0, minThrottle: 0.05,
+    ignitions: Infinity, nozzleExit: 0.3, length: 0.55, mass: 30, cost: 250_000, spool: 0.15,
+  }, [1, 2, 4], 1),
+  engine('eng-atom', 'Atom NTR', 'Nuclear thermal rocket: a fission reactor heats pure liquid hydrogen to 2,500 K. Twice the Isp of any chemical engine — but heavy, weak and slow to warm up. For upper stages and interplanetary tugs; feed it LH2 tanks.', {
+    propellant: 'lh2', thrustVac: 333_000, ispVac: 850, ispSL: 185, gimbal: 3 * DEG, minThrottle: 0.3,
+    ignitions: 12, nozzleExit: 1.4, length: 6.4, mass: 9_500, cost: 45_000_000, spool: 4, style: 'nuclear',
+  }, [1, 2, 3], 3),
+  engine('eng-spike', 'Spike Aerospike', 'Linear aerospike: the open plume adapts to the outside pressure, so it stays efficient from sea level to vacuum. Made for single-stage-to-orbit dreams.', {
+    propellant: 'hydrolox', thrustVac: 1_020_000, ispVac: 436, ispSL: 365, gimbal: 5 * DEG, minThrottle: 0.4,
+    ignitions: 4, nozzleExit: 2.3, length: 2.2, mass: 3_000, cost: 24_000_000, style: 'spike',
+  }, [1, 2, 3], 3),
 
   // --------------------------------------------------------------- SOLID BOOSTERS
   {
@@ -453,7 +536,7 @@ export const PART_DEFS: PartDef[] = [
     stackBottom: true,
     radialMount: false,
     allowRadialChildren: true,
-    configurable: { diameter: SIZES },
+    configurable: { diameter: SIZES, crossfeed: true },
     decoupler: { radial: false, separationDv: 1.5 },
     tier: 0,
   },
@@ -473,6 +556,7 @@ export const PART_DEFS: PartDef[] = [
     stackBottom: false,
     radialMount: true,
     allowRadialChildren: true,
+    configurable: { crossfeed: true },
     decoupler: { radial: true, separationDv: 4 },
     tier: 0,
   },
@@ -533,6 +617,25 @@ export const PART_DEFS: PartDef[] = [
     radialMount: false,
     allowRadialChildren: true,
     configurable: { diameter: SIZES, length: [0.5, 12, 0.25] },
+    tier: 0,
+  },
+  {
+    id: 'truss',
+    name: 'Truss Segment',
+    category: 'structural',
+    shape: 'truss',
+    description: 'Open lattice girder. Stack it, or hang it off the side of a tank for outriggers, station spines and lander frames. Almost no drag.',
+    cost: 60_000,
+    diameter: 1.25,
+    height: 4,
+    dryMass: 0,
+    crashTolerance: 12,
+    maxTemp: 1600,
+    stackTop: true,
+    stackBottom: true,
+    radialMount: true,
+    allowRadialChildren: true,
+    configurable: { diameter: [0.625, 1.25, 2.5], length: [1, 20, 0.5] },
     tier: 0,
   },
   {
@@ -635,6 +738,63 @@ export const PART_DEFS: PartDef[] = [
     tier: 1,
   },
   {
+    id: 'fin-control',
+    name: 'Control Fin',
+    category: 'aero',
+    shape: 'fin',
+    description: 'All-moving fin that steers in the atmosphere (±20°) with the pilot and SAS. Put a symmetric set near the tail — or near the nose as canards.',
+    cost: 120_000,
+    diameter: 0.2,
+    height: 1.3,
+    dryMass: 90,
+    crashTolerance: 10,
+    maxTemp: 1600,
+    stackTop: false,
+    stackBottom: false,
+    radialMount: true,
+    allowRadialChildren: false,
+    fin: { area: 1.0, span: 1.0, chord: 1.3, control: 20 * DEG },
+    tier: 0,
+  },
+  {
+    id: 'fin-control-large',
+    name: 'Heavy Control Fin',
+    category: 'aero',
+    shape: 'fin',
+    description: 'Big all-moving fin (±15°) for heavy boosters and returning first stages.',
+    cost: 320_000,
+    diameter: 0.3,
+    height: 2.6,
+    dryMass: 320,
+    crashTolerance: 10,
+    maxTemp: 1700,
+    stackTop: false,
+    stackBottom: false,
+    radialMount: true,
+    allowRadialChildren: false,
+    fin: { area: 3.6, span: 1.9, chord: 2.6, control: 15 * DEG },
+    tier: 1,
+  },
+  {
+    id: 'airbrake',
+    name: 'Airbrake',
+    category: 'aero',
+    shape: 'airbrake',
+    description: 'Hinged drag panel. Toggle with B (or an action group) to bleed off speed in the atmosphere: booster landings, re-entry and precise descents.',
+    cost: 180_000,
+    diameter: 0.2,
+    height: 1.0,
+    dryMass: 60,
+    crashTolerance: 10,
+    maxTemp: 1800,
+    stackTop: false,
+    stackBottom: false,
+    radialMount: true,
+    allowRadialChildren: false,
+    airbrake: { area: 1.1, cd: 1.3 },
+    tier: 1,
+  },
+  {
     id: 'heatshield',
     name: 'Ablative Heat Shield',
     category: 'recovery',
@@ -650,7 +810,7 @@ export const PART_DEFS: PartDef[] = [
     stackBottom: true,
     radialMount: false,
     allowRadialChildren: false,
-    configurable: { diameter: [1.25, 2.5, 3.75, 5] },
+    configurable: { diameter: [0.625, 1.25, 2.5, 3.75, 5] },
     heatShield: { ablatorPerM2: 55 },
     tier: 1,
   },
@@ -716,6 +876,26 @@ export const PART_DEFS: PartDef[] = [
   },
 
   // --------------------------------------------------------------- UTILITY
+  {
+    id: 'hab-module',
+    name: 'Habitat Module',
+    category: 'utility',
+    shape: 'cabin',
+    description: 'Pressurised crew cabin with windows, for stations and big landers. Carries crew (4 at 2.5 m, 9 at 3.75 m) but cannot fly the vessel — add a command pod or probe core.',
+    cost: 9_000_000,
+    diameter: 2.5,
+    height: 3.2,
+    dryMass: 3_600,
+    crashTolerance: 9,
+    maxTemp: 1500,
+    stackTop: true,
+    stackBottom: true,
+    radialMount: true,
+    allowRadialChildren: true,
+    configurable: { diameter: [2.5, 3.75] },
+    cabin: { crew: 4 },
+    tier: 2,
+  },
   {
     id: 'leg-small',
     name: 'Landing Leg',
@@ -922,6 +1102,25 @@ export function defaultConfig(def: PartDef): PartConfig {
   return c;
 }
 
+/** Propellant actually loaded at launch: the capacity times the tweakable fill level. */
+export function loadedPropellant(stats: PartStats, cfg: PartConfig): number {
+  const f = cfg.fill;
+  return stats.propellantCapacity * (f === undefined || !isFinite(f) ? 1 : Math.max(0, Math.min(1, f)));
+}
+
+/** Parts that respond to action groups (and what a group press does to them). */
+export function actionKind(def: PartDef): 'engine' | 'decouple' | 'chute' | 'fairing' | 'legs' | 'solar' | 'brake' | 'dock' | null {
+  if (def.shape === 'engine' || def.shape === 'srb') return 'engine';
+  if (def.decoupler) return 'decouple';
+  if (def.parachute) return 'chute';
+  if (def.fairing) return 'fairing';
+  if (def.legs) return 'legs';
+  if (def.shape === 'solar') return 'solar';
+  if (def.airbrake) return 'brake';
+  if (def.dock) return 'dock';
+  return null;
+}
+
 export function computePartStats(def: PartDef, cfg: PartConfig): PartStats {
   const st: PartStats = {
     height: def.height,
@@ -938,7 +1137,7 @@ export function computePartStats(def: PartDef, cfg: PartConfig): PartStats {
     ispSL: 0,
     torque: def.command?.torque ?? 0,
     ablator: 0,
-    crew: def.command?.crew ?? 0,
+    crew: def.command?.crew ?? def.cabin?.crew ?? 0,
   };
   const d = num(cfg.diameter, def.diameter);
   switch (def.shape) {
@@ -1069,6 +1268,23 @@ export function computePartStats(def: PartDef, cfg: PartConfig): PartStats {
       const r = def.rcs!;
       st.propellant = 'monoprop';
       st.propellantCapacity = r.propellant;
+      break;
+    }
+    case 'truss': {
+      const L = num(cfg.length, def.height);
+      st.diameterTop = st.diameterBottom = d;
+      st.height = L;
+      st.dryMass = 18 * d * L + 10;
+      st.cost = 40_000 + 12_000 * d * L;
+      break;
+    }
+    case 'cabin': {
+      const k = (d / def.diameter) ** 2;
+      st.diameterTop = st.diameterBottom = d;
+      st.height = def.height * Math.sqrt(d / def.diameter);
+      st.dryMass = def.dryMass * k;
+      st.crew = Math.round((def.cabin?.crew ?? 0) * k);
+      st.cost = def.cost * k;
       break;
     }
     case 'capsule':

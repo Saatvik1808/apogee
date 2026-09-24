@@ -20,6 +20,8 @@
  *    controller in the right.
  *  • OPS COLUMN — context buttons above STAGE (RCS, target, port alignment,
  *    port camera, undock, switch vessel) that only appear when they can act.
+ *    ACTIONS opens a small pad with the airbrakes and the action groups the
+ *    rocket's designer assigned (the phone's stand-in for the 1–0 keys).
  *
  * Each control captures its own pointer (setPointerCapture), so the two thumbs
  * work independently and a finger sliding off a control keeps controlling it.
@@ -55,6 +57,8 @@ export interface TouchActions {
   toggleDockCam(): void;
   undock(): void;
   switchVessel(): void;
+  toggleBrakes(): void;
+  actionGroup(n: number): void;
 }
 
 /** What the ops column can offer this frame (set by the flight state). */
@@ -71,6 +75,10 @@ export interface TouchOps {
   dockCam: boolean;
   docked: boolean;
   canSwitch: boolean;
+  /** Action groups with parts: bit n−1 for group n. */
+  groups: number;
+  /** Airbrakes: 0 none, 1 closed, 2 open. */
+  brakes: number;
 }
 
 const I = {
@@ -105,8 +113,13 @@ export class TouchControls {
   private thcPointer = -1;
   private fwdHeld = false;
   private aftHeld = false;
-  private readonly opsBtns: Record<'rcs' | 'target' | 'align' | 'cam' | 'undock' | 'switch', HTMLButtonElement>;
+  private readonly opsBtns: Record<'rcs' | 'target' | 'align' | 'cam' | 'undock' | 'switch' | 'actions', HTMLButtonElement>;
   private opsMask = -1;
+  private readonly agPop: HTMLDivElement;
+  private readonly agBrake: HTMLButtonElement;
+  private readonly agBtns: HTMLButtonElement[] = [];
+  private agKey = -1;
+  private agOpen = false;
   private thrHot: boolean | null = null;
   private readonly platform: Platform;
   private readonly actions: TouchActions;
@@ -231,13 +244,24 @@ export class TouchControls {
       cam: opsBtn('PORT CAM', 'View out of the docking port', () => this.actions.toggleDockCam()),
       undock: opsBtn('UNDOCK', 'Release the docked module', () => this.actions.undock()),
       switch: opsBtn('SWITCH', 'Fly another vessel of this flight', () => this.actions.switchVessel()),
+      actions: opsBtn('ACTIONS', 'Airbrakes and action groups', () => this.setActionsOpen(!this.agOpen)),
     };
     const ops = h('div', { class: 'tc-ops' });
-    for (const k of ['rcs', 'target', 'align', 'cam', 'undock', 'switch'] as const) {
+    for (const k of ['rcs', 'target', 'align', 'cam', 'undock', 'switch', 'actions'] as const) {
       this.opsBtns[k].style.display = 'none';
       ops.appendChild(this.opsBtns[k]);
     }
     this.root.appendChild(ops);
+    // Action pad (opens from ACTIONS)
+    this.agBrake = h('button', { class: 'tc-btn tc-ag tc-ag-brake', text: 'BRAKES', onClick: () => (this.platform.haptic('tick'), this.actions.toggleBrakes()) });
+    this.agPop = h('div', { class: 'tc-agpop' }, this.agBrake);
+    for (let n = 1; n <= 10; n++) {
+      const b = h('button', { class: 'tc-btn tc-ag', text: String(n % 10), title: `Action group ${n}`, onClick: () => (this.platform.haptic('tick'), this.actions.actionGroup(n)) });
+      this.agBtns.push(b);
+      this.agPop.appendChild(b);
+    }
+    this.agPop.style.display = 'none';
+    this.root.appendChild(this.agPop);
 
     // ---------------------------------------------------------------- joystick
     this.stickKnob = h('div', { class: 'tc-knob' });
@@ -336,6 +360,12 @@ export class TouchControls {
     return Math.sign(v) * Math.min(1, Math.pow(t, 1.6) * this.sensitivity);
   }
 
+  private setActionsOpen(on: boolean): void {
+    this.agOpen = on;
+    this.agPop.style.display = on ? '' : 'none';
+    this.opsBtns.actions.classList.toggle('active', on);
+  }
+
   private syncFore(): void {
     this.tf = (this.fwdHeld ? 1 : 0) - (this.aftHeld ? 1 : 0);
   }
@@ -387,6 +417,16 @@ export class TouchControls {
       b.cam.classList.toggle('active', o.dockCam);
       this.root.classList.toggle('rcs', rcsMode);
       if (wasRcs && !rcsMode) this.resetTranslation();
+    }
+    const agKey = o.groups | (o.brakes << 10);
+    if (agKey !== this.agKey) {
+      this.agKey = agKey;
+      const any = o.groups !== 0 || o.brakes !== 0;
+      this.opsBtns.actions.style.display = any ? '' : 'none';
+      if (!any && this.agOpen) this.setActionsOpen(false);
+      this.agBrake.style.display = o.brakes ? '' : 'none';
+      this.agBrake.classList.toggle('active', o.brakes === 2);
+      this.agBtns.forEach((b, i) => (b.style.display = o.groups & (1 << i) ? '' : 'none'));
     }
     const hot = rcsMode && throttle > 0;
     if (hot !== this.thrHot) {

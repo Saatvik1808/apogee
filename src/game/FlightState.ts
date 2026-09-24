@@ -258,6 +258,8 @@ export class FlightState implements GameState {
       switchVessel: (d) => this.switchVessel(d),
       toggleAlign: () => this.toggleAlign(),
       toggleDockCam: () => this.toggleDockCam(),
+      toggleBrakes: () => this.toggleBrakes(),
+      actionGroup: (n) => this.actionGroup(n),
     };
     this.hud = new FlightHUD(ctx.ui, actions, this.navball, ctx.platform.touch);
     this.hudTouch = ctx.platform.touch;
@@ -275,6 +277,8 @@ export class FlightState implements GameState {
       toggleDockCam: () => this.toggleDockCam(),
       undock: () => this.undockActive(),
       switchVessel: () => this.switchVessel(1),
+      toggleBrakes: () => this.toggleBrakes(),
+      actionGroup: (n) => this.actionGroup(n),
     });
     this.touch.setVisible(ctx.platform.touch);
     this.radioFeed = new RadioFeed(ctx.ui, (high) => ctx.audio.quindar(high));
@@ -498,6 +502,48 @@ export class FlightState implements GameState {
   /** Real seconds of the frame being rendered (set in update, read in render). */
   private frameDt = 1 / 60;
 
+  /**
+   * Sandbox "set orbit": put the active vessel into a circular orbit. Returns an
+   * error message, or null when done.
+   */
+  teleport(bodyId: 'earth' | 'moon' | 'mars', altKm: number, incDeg: number): string | null {
+    const body = this.ctx.system.get(bodyId);
+    const minKm = body.atmosphere ? Math.ceil(body.atmosphere.ceiling / 1000) + 10 : 5;
+    if (!Number.isFinite(altKm) || altKm < minKm) return `Pick an altitude of at least ${minKm} km above ${body.name}.`;
+    const soiKm = Number.isFinite(body.soiRadius) ? (body.soiRadius - body.radius) / 1000 : Infinity;
+    if (altKm > soiKm * 0.9) return `That is outside ${body.name}'s sphere of influence (${Math.round(soiKm).toLocaleString('en-US')} km).`;
+    const v = this.sim.active;
+    if (v.destroyed) return 'The vessel was destroyed — revert to launch or build a new one.';
+    this.sim.autopilot.disengage();
+    this.sim.teleport(v, body, altKm * 1000, Number.isFinite(incDeg) ? incDeg : 0);
+    this.countdown = -1;
+    if (this.camera.mode === 'tower') this.camera.mode = 'chase';
+    this.hud.logEvent(this.sim.missionTime, `Teleported to a ${Math.round(altKm)} km orbit of ${body.name}`, 'info');
+    this.hud.showToast(`${Math.round(altKm)} km orbit`, body.name, 2.5);
+    return null;
+  }
+
+  /** Fire action group n (1–10) set up in the assembly building. */
+  private actionGroup(n: number): void {
+    const count = this.sim.triggerActionGroup(n);
+    const held = this.sim.groupHeld;
+    if (count) {
+      this.hud.showToast(`Action group ${n % 10}`, held ? `${count - held} of ${count} parts · separations wait for liftoff` : `${count} part${count > 1 ? 's' : ''}`, held ? 2.4 : 1.4);
+      this.ctx.audio.click();
+      this.ctx.platform.haptic('tick');
+    } else this.hud.showToast(`Action group ${n % 10} is empty`, 'Assign parts to it in the assembly building (select a part)', 2.2);
+  }
+
+  private toggleBrakes(): void {
+    if (!this.sim.active.parts.some((p) => !!p.def.airbrake)) {
+      this.hud.showToast('No airbrakes', 'Add airbrakes (Aerodynamics) in the assembly building', 2);
+      return;
+    }
+    const on = this.sim.toggleBrakes();
+    this.hud.showToast(on ? 'Airbrakes open' : 'Airbrakes closed', '', 1.2);
+    this.ctx.audio.click();
+  }
+
   private toggleLegs(): void {
     const v = this.sim.active;
     const any = v.parts.some((p) => p.legsDeployed);
@@ -571,6 +617,21 @@ export class FlightState implements GameState {
         break;
       case 'KeyG':
         this.toggleLegs();
+        break;
+      case 'KeyB':
+        this.toggleBrakes();
+        break;
+      case 'Digit1':
+      case 'Digit2':
+      case 'Digit3':
+      case 'Digit4':
+      case 'Digit5':
+      case 'Digit6':
+      case 'Digit7':
+      case 'Digit8':
+      case 'Digit9':
+      case 'Digit0':
+        this.actionGroup(code === 'Digit0' ? 10 : Number(code.slice(5)));
         break;
       case 'Comma':
         this.sim.warpDown();
@@ -800,7 +861,7 @@ export class FlightState implements GameState {
 
   /** Reused readout objects (no allocation per frame). */
   private readonly dockView: DockView = { target: '', distance: 0, closing: 0, lateral: 0, angleDeg: 0, x: 0, y: 0, vx: 0, vy: 0, capture: false, align: false, dockCam: false };
-  private readonly touchOps: TouchOps = { rcsAvailable: false, rcs: false, targets: false, dock: false, align: false, dockCam: false, docked: false, canSwitch: false };
+  private readonly touchOps: TouchOps = { rcsAvailable: false, rcs: false, targets: false, dock: false, align: false, dockCam: false, docked: false, canSwitch: false, groups: 0, brakes: 0 };
 
   private buildDockView(): DockView | null {
     const sim = this.sim;
@@ -946,9 +1007,14 @@ export class FlightState implements GameState {
     }
     let hasRcs = false;
     let docked = false;
+    let groups = 0;
+    let brakes = 0;
     for (const p of v.parts) {
       if (p.def.rcs) hasRcs = true;
       if (p.dockedTo) docked = true;
+      if (p.def.airbrake) brakes = v.controls.brakes ? 2 : 1;
+      const g = p.config.groups;
+      if (Array.isArray(g)) for (const n of g) if (n >= 1 && n <= 10) groups |= 1 << (n - 1);
     }
 
     this.hud.update(
@@ -965,6 +1031,8 @@ export class FlightState implements GameState {
         docked,
         vessels: controllable,
         dock: this.mapMode ? null : this.buildDockView(),
+        groups,
+        brakes,
       },
       realDt,
     );
@@ -988,6 +1056,8 @@ export class FlightState implements GameState {
       o.dockCam = this.camera.mode === 'dock';
       o.docked = docked;
       o.canSwitch = controllable > 1;
+      o.groups = groups;
+      o.brakes = brakes;
       this.touch.update(realDt, v.controls.throttle, this.nextStageLabel(), !!nextUids && !v.destroyed, this.hud.panels, this.mapMode, o);
     }
     for (const tap of inp.takeTaps()) {

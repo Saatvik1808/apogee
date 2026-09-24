@@ -17,7 +17,7 @@
  * Key concepts: specific impulse, mixture ratio, bulk density, tank mass fraction
  */
 
-export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'monoprop' | 'solid';
+export type PropellantId = 'kerolox' | 'hydrolox' | 'methalox' | 'hypergolic' | 'lh2' | 'monoprop' | 'solid';
 
 export interface PropellantSpec {
   id: PropellantId;
@@ -76,6 +76,18 @@ export const PROPELLANTS: Record<PropellantId, PropellantSpec> = {
     color: '#8dff9e',
     finish: 'gray',
   },
+  lh2: {
+    id: 'lh2',
+    name: 'Liquid hydrogen (nuclear thermal)',
+    short: 'LH2',
+    // Pure hydrogen: the best exhaust velocity a nuclear engine can get, and a
+    // density of 71 kg/m³ — tanks four times the size of hydrolox for the same mass
+    density: 71,
+    tankMassPerM3: 17,
+    costFactor: 1.6,
+    color: '#b5f1ff',
+    finish: 'foam',
+  },
   monoprop: {
     id: 'monoprop',
     name: 'Hydrazine (Monopropellant)',
@@ -98,4 +110,4 @@ export const PROPELLANTS: Record<PropellantId, PropellantSpec> = {
   },
 };
 
-export const LIQUID_PROPELLANTS: PropellantId[] = ['kerolox', 'methalox', 'hydrolox', 'hypergolic'];
+export const LIQUID_PROPELLANTS: PropellantId[] = ['kerolox', 'methalox', 'hydrolox', 'hypergolic', 'lh2', 'monoprop'];

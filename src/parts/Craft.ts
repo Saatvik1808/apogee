@@ -14,9 +14,18 @@
  *
  * Symmetry groups tie radially mounted copies together so edits apply to all.
  *
- * Key concepts: scene trees, relative transforms, symmetry, serialisation
+ * On top of the attachment, a part can carry a placement TWEAK (the "offset" and
+ * "rotate" tools of sandbox editors): a translation in its attach frame and a
+ * rotation about its own centre. Because children are laid out from the parent's
+ * FINAL pose, tilting a booster tilts everything mounted on it too — and because
+ * the attach frame of each symmetric copy is rotated around the parent's axis,
+ * one tweak applied to every copy stays symmetric.
+ *
+ * Key concepts: scene trees, relative transforms, symmetry, serialisation,
+ * re-rooting a tree (reversing parent links)
  */
-import { Quaternion, Vector3 } from 'three';
+import { Euler, Quaternion, Vector3 } from 'three';
+import { DEG } from '../core/constants';
 import {
   computePartStats,
   defaultConfig,
@@ -104,6 +113,9 @@ export function subtreeUids(c: CraftData, uid: number): number[] {
 
 const Y = new Vector3(0, 1, 0);
 const X = new Vector3(1, 0, 0);
+const _off = new Vector3();
+const _euler = new Euler();
+const _qr = new Quaternion();
 
 /** Distance from a radially mounted part's centre to the surface it sits on. */
 export function radialInnerOffset(def: PartDef, stats: PartStats): number {
@@ -111,6 +123,8 @@ export function radialInnerOffset(def: PartDef, stats: PartStats): number {
     case 'fin':
     case 'solar':
       return 0.02;
+    case 'airbrake':
+      return 0.06;
     case 'leg':
       return 0.18;
     case 'radial-decoupler':
@@ -159,6 +173,12 @@ export function layoutCraft(c: CraftData): Map<number, PartLayout> {
           .add(parent.position)
           .addScaledVector(outward, pr + radialInnerOffset(def, stats));
       }
+      // Placement tweaks: offset in the attach frame, then a rotation about the
+      // part's own centre (the root defines the vessel frame and is never tweaked)
+      const off = p.config.offset;
+      if (off) position.add(_off.set(off[0], off[1], off[2]).applyQuaternion(rotation));
+      const rot = p.config.rot;
+      if (rot && (rot[0] || rot[1] || rot[2])) rotation.multiply(_qr.setFromEuler(_euler.set(rot[0] * DEG, rot[1] * DEG, rot[2] * DEG)));
     }
     const lay: PartLayout = { uid: p.uid, part: p, def, stats, position, rotation, children: [], depth };
     out.set(p.uid, lay);
@@ -259,4 +279,78 @@ export function deserializeCraft(s: string): CraftData | null {
   } catch {
     return null;
   }
+}
+
+
+/**
+ * Make `uid` the root of the craft by reversing the parent links on the path from
+ * the old root. Only stack links can be reversed (a part cannot hang "radially"
+ * off its own child), so every link on the path must be above/below and carry no
+ * placement tweak. Returns false (craft unchanged) otherwise.
+ */
+export function rerootCraft(c: CraftData, uid: number): boolean {
+  const target = findPart(c, uid);
+  if (!target || target.parent === -1) return false;
+  const path: CraftPart[] = [];
+  for (let p: CraftPart | undefined = target; p && p.parent !== -1; p = findPart(c, p.parent)) {
+    if (p.attach !== 'above' && p.attach !== 'below') return false;
+    if (p.config.offset || (p.config.rot && (p.config.rot[0] || p.config.rot[1] || p.config.rot[2]))) return false;
+    path.push(p);
+  }
+  // path: target … child of the old root. Flip each link: the parent becomes the
+  // child, attached on the opposite side.
+  const links = path.map((p) => ({ child: p, parent: p.parent, attach: p.attach }));
+  // Layout ignores tweaks on the root; drop any the old root carries so they do
+  // not suddenly apply once it hangs from another part
+  const oldRoot = rootPart(c);
+  if (oldRoot) {
+    delete oldRoot.config.offset;
+    delete oldRoot.config.rot;
+  }
+  for (const l of links) {
+    const par = findPart(c, l.parent)!;
+    par.parent = l.child.uid;
+    par.attach = l.attach === 'below' ? 'above' : 'below';
+    par.angle = 0;
+    par.offsetY = 0;
+  }
+  target.parent = -1;
+  target.attach = 'root';
+  target.angle = 0;
+  target.offsetY = 0;
+  target.symmetry = 0;
+  // Parts first in the array are laid out first; keep the root at index 0
+  c.parts.sort((a, b) => (a.uid === uid ? -1 : b.uid === uid ? 1 : 0));
+  return true;
+}
+
+/** A detached copy of a subtree (for subassemblies): fresh uids from 1, root first. */
+export function extractSubtree(c: CraftData, uid: number, name: string): CraftData {
+  const ids = subtreeUids(c, uid);
+  const map = new Map<number, number>();
+  ids.forEach((id, i) => map.set(id, i + 1));
+  const syms = new Map<number, number>();
+  const parts: CraftPart[] = ids.map((id) => {
+    const src = findPart(c, id)!;
+    const copy = JSON.parse(JSON.stringify(src)) as CraftPart;
+    copy.uid = map.get(id)!;
+    if (id === uid) {
+      copy.parent = -1;
+      copy.attach = 'root';
+      copy.angle = 0;
+      copy.offsetY = 0;
+      copy.symmetry = 0;
+      delete copy.config.offset;
+      delete copy.config.rot;
+    } else {
+      copy.parent = map.get(src.parent)!;
+      if (copy.symmetry) {
+        if (!syms.has(copy.symmetry)) syms.set(copy.symmetry, syms.size + 1);
+        copy.symmetry = syms.get(copy.symmetry)!;
+      }
+    }
+    copy.stage = -1;
+    return copy;
+  });
+  return { version: 1, name, description: '', parts, nextUid: parts.length + 1, nextSymmetry: syms.size + 1, manualStaging: false };
 }

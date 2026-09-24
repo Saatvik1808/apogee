@@ -40,6 +40,12 @@ export class FlightPart {
   fuelCapacity: number;
   /** Fuel-flow group (section id); recomputed after staging. */
   group = 0;
+  /**
+   * Flow priority inside the group: the number of crossfeed decouplers between
+   * this tank and the group's root. Engines drain the deepest tanks first, so
+   * boosters empty before the core (asparagus staging).
+   */
+  flowDepth = 0;
 
   // --- engine -----------------------------------------------------------------
   isEngine: boolean;
@@ -73,6 +79,12 @@ export class FlightPart {
   legsDeployed = false;
   legDeploy = 0;
   solarDeploy = 0;
+  /** Solar array folded away by the pilot (action group) — otherwise automatic. */
+  solarStowed = false;
+  /** Airbrake opening 0..1 (animates toward the vessel's brake command). */
+  brakeDeploy = 0;
+  /** Control-surface deflection (rad) this step — physics and visuals. */
+  finDeflect = 0;
   fairingAttached: boolean;
   /** Inside an attached fairing (no aero, no heating). */
   shielded = false;
@@ -106,7 +118,8 @@ export class FlightPart {
     this.symmetry = 0;
     this.stage = stage;
     this.propellant = stats.propellant && stats.propellantCapacity > 0 ? stats.propellant : null;
-    this.fuel = stats.propellantCapacity;
+    const fill = config.fill;
+    this.fuel = stats.propellantCapacity * (fill === undefined || !isFinite(fill) ? 1 : Math.max(0, Math.min(1, fill)));
     this.fuelCapacity = stats.propellantCapacity;
     this.isEngine = def.shape === 'engine' || def.shape === 'srb';
     this.isSolid = def.shape === 'srb';

@@ -4,8 +4,14 @@ A browser space-program game: design rockets in the vehicle assembly building, t
 from a real-scale Earth to orbit, around the Moon and down to a powered landing on its surface.
 Everything runs client-side in the browser (Three.js + TypeScript, no server).
 
-- **Rocket builder** — tanks, engines and engine clusters, decouplers, fins, legs and parachutes
-  with attach nodes, radial symmetry, drag-and-drop staging, undo/redo and live Δv / TWR per stage.
+- **Rocket builder** — tanks from 0.625 m to 10 m, chemical, aerospike and nuclear engines,
+  decouplers, fins and control fins, airbrakes, trusses, crew cabins, legs and parachutes, with
+  attach nodes, radial symmetry, drag-and-drop staging, undo/redo and live Δv / TWR per stage.
+- **Sandbox tools** — tweakables (propellant load, gimbal lock, parachute altitude, crossfeed for
+  asparagus staging), action groups, offset and rotate tools, re-rooting, subassemblies, shareable
+  design codes, an engineer overlay with the centres of mass, lift and thrust, Δv and TWR on
+  Earth, the Moon or Mars, starting straight in orbit, and cheats (infinite propellant, no
+  damage, no heating, set orbit).
 - **Real orbital mechanics** — true-scale Earth, Moon and Mars, patched-conic trajectories,
   atmospheric drag, fuel flow and staging, maneuver nodes with a burn planner (circularize,
   trans-lunar injection, mid-course correction, return to Earth, de-orbit).
@@ -110,6 +116,7 @@ under 1 m/s, and the ports latch.
 | , / .           | Time warp down / up            | V       | Cycle camera (incl. port view)  |
 | /               | Stop time warp                 | P       | Pause                           |
 | F1              | Help                           | F2      | Hide the HUD                    |
+| B               | Airbrakes open / closed        | 1 … 0   | Action groups 1–10              |
 | Esc             | Pause menu                     | R       | Toggle RCS thrusters            |
 | H / N           | RCS translate forward / back   | I / K   | RCS translate up / down         |
 | J / L           | RCS translate left / right     | [ / ]   | Switch to previous / next vessel |
@@ -135,6 +142,30 @@ flown again later; the campaign clock moves forward between flights.
 | Ctrl/Cmd+D            | Duplicate selected   |
 | Ctrl/Cmd+S            | Save craft           |
 | F                     | Frame the rocket     |
+| W/S · A/D · Q/E       | Rotate the selected part about X · Y · Z (15°, Shift 5°) |
+| Alt + W/S · A/D · Q/E | Move the selected part (0.25 m, Shift 0.05 m) |
+| C                     | Engineer overlay (centres of mass, lift, thrust) |
+
+## Sandbox building
+
+Select a part to open its inspector:
+
+- **Tweakables** — propellant load (0–100 %), gimbal lock, the altitude a parachute opens fully,
+  thrust limit, and **crossfeed** on decouplers: boosters on crossfeed decouplers feed the core,
+  and the deepest tanks drain first, so asparagus staging works and the Δv panel accounts for it.
+- **Action groups** — tick 1–0 on any engine, decoupler, parachute, fairing, leg, solar array,
+  airbrake or docking port; press the number key in flight (or ACTIONS on a phone) to fire them.
+- **Placement** — move and rotate a part in its attach frame; symmetric copies follow. Radially
+  mounted parts have stack nodes too (nose cones on boosters, tanks on outriggers).
+- **Set as root**, **Save subassembly** (the last tab of the parts list holds them), **Merge**
+  a saved or reference design into the current one, and **Share**: a compressed text code
+  (`APG1:…`) that anyone can paste back with Import.
+- **Engineer overlay** (C) — yellow centre of mass (hollow: tanks empty), cyan centre of lift and
+  magenta thrust line; the **Stability** figure is the static margin in body diameters (above ~1
+  the rocket flies nose-first by itself).
+- The Vehicle card evaluates TWR and surface Δv on **Earth, the Moon or Mars**, and the launch
+  dialog can **start** a sandbox flight on the pad, in low Earth orbit, geostationary orbit,
+  lunar orbit or Mars orbit. The pause menu of a sandbox flight has **cheats** and **set orbit**.
 
 ## URL parameters
 

@@ -4,7 +4,8 @@
  * The simulation owns the truth (part list, fuel, chute states); the view owns the
  * meshes. Each frame the view reads simulation state and animates: plumes grow
  * with throttle and balloon in thin air, nozzle interiors glow, parachute canopies
- * inflate and swing to trail behind the airflow, legs unfold, solar arrays deploy.
+ * inflate and swing to trail behind the airflow, legs unfold, solar arrays deploy,
+ * control fins swivel with the stick and airbrake flaps swing open.
  *
  * When the part tree changes (staging, a part burning off), the simulation bumps
  * `structureVersion` and the view rebuilds — the separated stage gets its own
@@ -164,6 +165,10 @@ export class VesselView {
         w.visible = true;
       }
       if (e.vis.fairingShell) e.vis.fairingShell.visible = p.fairingAttached;
+      for (const m of e.vis.movers) {
+        if (m.kind === 'fin') m.obj.rotation.x = p.finDeflect;
+        else m.obj.rotation.z = p.brakeDeploy * 1.15;
+      }
     }
   }
 

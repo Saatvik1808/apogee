@@ -546,6 +546,48 @@
   align-items: stretch;
 }
 
+/* --------------------------------------------------------------- sandbox cheats */
+.modal-cheats {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.cheat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.cheat-row .btn {
+  min-width: 56px;
+}
+.cheat-t {
+  font-weight: 600;
+}
+.cheat-s {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.cheat-orbit {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+}
+.cheat-orbit label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cheat-orbit input {
+  width: 100%;
+}
+
 /* --------------------------------------------------------------- fps meter */
 .fps {
   position: absolute;

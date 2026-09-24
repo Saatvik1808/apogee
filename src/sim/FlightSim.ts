@@ -39,6 +39,7 @@ import type { SolarSystem } from '../physics/SolarSystem';
 import { TrajectoryPredictor } from '../physics/Trajectory';
 import { Orbit, orbitalFrame } from '../physics/Orbit';
 import type { CraftData } from '../parts/Craft';
+import { actionKind } from '../parts/PartCatalog';
 import type { LaunchSite } from '../world/LaunchSites';
 import { AttitudeController } from './Attitude';
 import { Autopilot } from './Autopilot';
@@ -153,6 +154,21 @@ function isVesselTarget(t: CelestialBody | Vessel): t is Vessel {
 const _qd = new Quaternion();
 const _nose = new Vector3();
 const _vrel = new Vector3();
+
+/**
+ * Where a decoupler splits the part tree. A stack separator stays with the stage
+ * BELOW it (like an interstage): built top-down it hangs below its parent and
+ * leaves with its own subtree; in an inverted tree (root at the bottom, the
+ * separator attached above its parent) the split happens at the part above it.
+ * Radial separators leave with their booster.
+ */
+export function separationPoint(p: FlightPart): FlightPart {
+  if (p.def.decoupler && !p.def.decoupler.radial && p.attach === 'above') {
+    const up = p.children.find((c) => c.attach === 'above');
+    if (up) return up;
+  }
+  return p;
+}
 
 export class FlightSim {
   readonly system: SolarSystem;
@@ -942,6 +958,100 @@ export class FlightSim {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // Action groups & sandbox tools
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fire action group `n` (1–10) on the active vessel: every part assigned to it
+   * responds — engines light or shut down, legs, solar arrays and airbrakes flip,
+   * decouplers, parachutes and fairings fire, docking ports release. Toggles are
+   * decided once per group, so a mixed group always flips the same way.
+   * Returns how many parts responded.
+   */
+  triggerActionGroup(n: number): number {
+    const v = this.active;
+    this.groupHeld = 0;
+    if (v.destroyed) return 0;
+    const parts = v.parts.filter((p) => !p.destroyed && Array.isArray(p.config.groups) && p.config.groups.includes(n));
+    if (!parts.length) return 0;
+    if (this.warp.rails) this.setWarpIndex(0);
+    const legsOut = parts.some((p) => !!p.def.legs && p.legsDeployed);
+    const enginesOn = parts.some((p) => p.isEngine && !p.isSolid && p.engineIgnited);
+    let brakes = false;
+    const separate: FlightPart[] = [];
+    for (const p of parts) {
+      switch (actionKind(p.def)) {
+        case 'engine':
+          if (p.isSolid) p.engineIgnited = true;
+          else if (enginesOn) {
+            p.engineIgnited = false;
+            p.engineRunning = false;
+          } else p.engineIgnited = true;
+          break;
+        case 'chute':
+          if (p.chuteState === 'stowed') p.chuteState = 'armed';
+          break;
+        case 'fairing':
+          if (p.fairingAttached) this.jettisonFairing(v, p);
+          break;
+        case 'legs':
+          p.legsDeployed = !legsOut;
+          break;
+        case 'solar':
+          p.solarStowed = !p.solarStowed;
+          break;
+        case 'brake':
+          brakes = true;
+          break;
+        case 'decouple':
+        case 'dock':
+          // Clamped on the pad the stack is pinned as one piece: separations wait for liftoff
+          if (v.situation === 'prelaunch') this.groupHeld++;
+          else separate.push(p);
+          break;
+      }
+    }
+    if (brakes) v.controls.brakes = !v.controls.brakes;
+    for (const p of separate) {
+      if (p.destroyed) continue;
+      // An earlier separation in this group may have moved the part to another
+      // vessel (and handed control to it): act on whichever vessel holds it now
+      const owner = this.vessels.find((x) => !x.destroyed && x.parts.includes(p));
+      if (!owner) continue;
+      if (p.def.decoupler) this.decouple(owner, p);
+      else if (p.dockedTo && owner === this.active) this.undock(p);
+    }
+    v.pruneEmptyStages();
+    v.computeMassProperties(true);
+    if (v.pinned) v.pinnedPos.copy(v.r).applyQuaternion(v.body.rotationInverse);
+    this.predictionDirty = true;
+    return parts.length;
+  }
+
+  /** Separations an action group could not fire (vessel still clamped on the pad). */
+  groupHeld = 0;
+
+  /** Airbrakes open/closed (B). Returns the new state. */
+  toggleBrakes(): boolean {
+    const c = this.active.controls;
+    c.brakes = !c.brakes;
+    return c.brakes;
+  }
+
+  /** Sandbox "set orbit": move a vessel into a circular orbit around any body. */
+  teleport(v: Vessel, body: CelestialBody, altitude: number, incDeg: number): void {
+    if (v.destroyed) return;
+    this.setWarpIndex(0);
+    for (const n of [...this.nodes]) this.removeNode(n);
+    this.placeInOrbit(v, body, altitude, incDeg);
+    this.prevRel.delete(v.id);
+    this.prevQ.delete(v.id);
+    this.prevBody.delete(v.id);
+    if (isNaN(this.launchTime)) this.launchTime = this.time;
+    this.predictionDirty = true;
+  }
+
   private decouple(v: Vessel, p: FlightPart): void {
     const d = p.def.decoupler!;
     // Separation axis: stack → along vessel Y (the lower part is pushed back),
@@ -953,7 +1063,7 @@ export class FlightSim {
       const sign = p.attach === 'above' ? -1 : 1;
       axis = new Vector3(0, sign, 0).applyQuaternion(v.q);
     }
-    const child = v.split(p, d.separationDv, axis);
+    const child = v.split(separationPoint(p), d.separationDv, axis);
     if (child) {
       child.situation = v.situation;
       // Radial boosters: small outward tumble

@@ -59,6 +59,10 @@ export interface HudActions {
   toggleAlign(): void;
   /** View out of our docking port (toggle). */
   toggleDockCam(): void;
+  /** Airbrakes open / closed. */
+  toggleBrakes(): void;
+  /** Fire action group n (1–10). */
+  actionGroup(n: number): void;
 }
 
 /** Final-approach readout (see FlightSim.DockingState), in the docking-port view frame. */
@@ -115,6 +119,10 @@ export interface HudExtra {
   vessels: number;
   /** Docking readout when a target port is in range. */
   dock: DockView | null;
+  /** Action groups with parts assigned: bit n−1 set for group n. */
+  groups: number;
+  /** Airbrakes: 0 none on the vessel, 1 closed, 2 open. */
+  brakes: number;
 }
 
 const SAS_MODES: SASMode[] = ['stability', 'maneuver', 'prograde', 'retrograde', 'normal', 'antinormal', 'radial-out', 'radial-in', 'target', 'anti-target', 'port'];
@@ -197,6 +205,10 @@ export class FlightHUD {
   private readonly rcsBtn: HTMLButtonElement;
   private readonly undockBtn: HTMLButtonElement;
   private readonly switchBtn: HTMLButtonElement;
+  private readonly brakesBtn: HTMLButtonElement;
+  private readonly agRow: HTMLDivElement;
+  private readonly agBtns: HTMLButtonElement[] = [];
+  private agMask = -1;
   // target
   private readonly tgtName: HTMLSpanElement;
   private readonly tgtInfo: HTMLSpanElement;
@@ -383,12 +395,23 @@ export class FlightHUD {
     this.undockBtn.style.display = 'none';
     this.switchBtn = h('button', { class: 'btn small', text: 'Switch vessel ( ] )', title: 'Control another vessel of this flight', onClick: () => actions.switchVessel(1) });
     this.switchBtn.style.display = 'none';
+    this.brakesBtn = h('button', { class: 'btn small', text: touch ? 'Brakes' : 'Brakes (B)', title: 'Open / close the airbrakes', onClick: () => actions.toggleBrakes() });
+    this.brakesBtn.style.display = 'none';
+    // Action groups 1–0 (only the ones with parts assigned are shown)
+    this.agRow = h('div', { class: 'agrow' }, h('span', { class: 'ag-l', text: 'Actions' }));
+    for (let n = 1; n <= 10; n++) {
+      const b = h('button', { class: 'btn small ag', text: String(n % 10), title: `Action group ${n} (key ${n % 10})`, onClick: () => actions.actionGroup(n) });
+      this.agBtns.push(b);
+      this.agRow.appendChild(b);
+    }
+    this.agRow.style.display = 'none';
     const resCard = h(
       'div',
       { class: 'card pe' },
       h('div', { class: 'card-h' }, h('span', { text: 'Resources' })),
       this.resEl,
-      h('div', { class: 'toggles' }, this.legsBtn, this.rcsBtn, this.undockBtn, this.switchBtn),
+      h('div', { class: 'toggles' }, this.legsBtn, this.rcsBtn, this.brakesBtn, this.undockBtn, this.switchBtn),
+      this.agRow,
     );
     // Navigation target strip (top of the flight computer)
     this.tgtName = h('span', { class: 'tgt-name', text: 'No target' });
@@ -459,6 +482,7 @@ export class FlightHUD {
       ['RCS (above STAGE)', 'Left thumb becomes a translation stick · FWD / AFT move along the nose'],
       ['TARGET · ALIGN · PORT CAM', 'Pick a vessel · hold our port facing its port · look out of the port'],
       ['UNDOCK · SWITCH', 'Release a docked module · fly another vessel'],
+      ['ACTIONS', 'Airbrakes and the action groups set up in the assembly building'],
       ['Drag · pinch', 'Rotate · zoom the camera'],
       ['Map ◎ then tap an orbit', 'Add a maneuver node there'],
       ['Chart / chip icons', 'Telemetry · flight computer (autopilot, burns)'],
@@ -474,6 +498,8 @@ export class FlightHUD {
       ['Space', 'Activate next stage'],
       ['T', 'Toggle SAS (attitude hold)'],
       ['G', 'Toggle landing legs'],
+      ['B', 'Airbrakes open / closed'],
+      ['1 … 0', 'Action groups 1–10 (assigned in the assembly building)'],
       [', / .', 'Time warp down / up'],
       ['/', 'Stop warp'],
       ['M', 'Map view'],
@@ -965,6 +991,13 @@ export class FlightHUD {
     this.rcsBtn.classList.toggle('active', extra.rcs);
     this.undockBtn.style.display = extra.docked ? '' : 'none';
     this.switchBtn.style.display = extra.vessels > 1 ? '' : 'none';
+    this.brakesBtn.style.display = extra.brakes ? '' : 'none';
+    this.brakesBtn.classList.toggle('active', extra.brakes === 2);
+    if (extra.groups !== this.agMask) {
+      this.agMask = extra.groups;
+      this.agRow.style.display = extra.groups ? '' : 'none';
+      this.agBtns.forEach((b, i) => (b.style.display = extra.groups & (1 << i) ? '' : 'none'));
+    }
 
     // Docking numbers
     const dk = extra.dock;

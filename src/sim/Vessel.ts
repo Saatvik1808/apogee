@@ -57,6 +57,8 @@ export interface ControlState {
   tx: number;
   ty: number;
   tz: number;
+  /** Airbrakes commanded open. */
+  brakes: boolean;
 }
 
 export interface ContactPoint {
@@ -90,6 +92,10 @@ export interface AeroFin {
   pos: Vector3;
   normal: Vector3;
   area: number;
+  /** Maximum deflection (rad) of an all-moving control fin; 0 for a fixed fin. */
+  control: number;
+  /** Spanwise hinge axis (vessel frame) a control fin turns about. */
+  hinge: Vector3;
 }
 
 let nextVesselId = 1;
@@ -140,6 +146,7 @@ export class Vessel {
     tx: 0,
     ty: 0,
     tz: 0,
+    brakes: false,
   };
   /** RCS jets fired this step (visuals/audio). */
   rcsActive = false;
@@ -404,13 +411,24 @@ export class Vessel {
     this.computeBounds();
   }
 
+  /**
+   * Fuel-flow groups: a decoupler normally starts a new group (a stage cannot
+   * drink from the tanks it will drop); a decoupler with CROSSFEED keeps the far
+   * side in the same group one level deeper, and engines drain the deepest level
+   * first — the booster tanks empty into the core engines before the core's own.
+   */
   private computeGroups(): void {
     let next = 0;
-    const visit = (p: FlightPart, g: number) => {
+    const visit = (p: FlightPart, g: number, depth: number) => {
       p.group = g;
-      for (const c of p.children) visit(c, c.def.decoupler ? ++next : g);
+      p.flowDepth = depth;
+      for (const c of p.children) {
+        if (!c.def.decoupler) visit(c, g, depth);
+        else if (c.config.crossfeed) visit(c, g, depth + 1);
+        else visit(c, ++next, 0);
+      }
     };
-    visit(this.root, 0);
+    visit(this.root, 0, 0);
   }
 
   /**
@@ -493,12 +511,18 @@ export class Vessel {
       const shape = p.def.shape;
       if (shape === 'fin' && p.def.fin) {
         const n = new Vector3(0, 0, 1).applyQuaternion(p.rotation);
+        const hinge = new Vector3(1, 0, 0).applyQuaternion(p.rotation);
         const pos = new Vector3(p.def.fin.span * 0.45, 0, 0).applyQuaternion(p.rotation).add(p.position);
-        fins.push({ part: p, pos, normal: n, area: p.def.fin.area });
+        fins.push({ part: p, pos, normal: n, area: p.def.fin.area, control: p.def.fin.control ?? 0, hinge });
         continue;
       }
-      if (shape === 'solar' || shape === 'leg' || shape === 'radial-chute' || shape === 'radial-decoupler') {
+      if (shape === 'solar' || shape === 'leg' || shape === 'radial-chute' || shape === 'radial-decoupler' || shape === 'airbrake') {
         body.push({ part: p, pos: p.position.clone(), sideArea: p.def.height * p.def.diameter * 0.6 });
+        continue;
+      }
+      if (shape === 'truss') {
+        // Open lattice: the air mostly passes through it
+        body.push({ part: p, pos: p.position.clone(), sideArea: p.stats.diameterTop * p.height * 0.25 });
         continue;
       }
       let rTop = p.stats.diameterTop / 2;
@@ -609,7 +633,7 @@ export class Vessel {
         }
         continue;
       }
-      if (shape === 'solar' || shape === 'radial-chute' || shape === 'radial-decoupler') {
+      if (shape === 'solar' || shape === 'radial-chute' || shape === 'radial-decoupler' || shape === 'airbrake') {
         pts.push({ part: p, pos: p.position.clone(), leg: false });
         continue;
       }
@@ -773,7 +797,13 @@ export class Vessel {
     const off = new Vector3().copy(child.com).sub(this.com);
     child.v.copy(this.v).add(new Vector3().crossVectors(this.w, off).applyQuaternion(this.q));
     child.situation = this.situation === 'prelaunch' ? 'flying' : this.situation;
-    child.stages = [];
+    // The stages still to fire follow their parts: a separated section that
+    // carries the command module (and gets control) keeps its own staging
+    const movingUids = new Set(moving.map((x) => x.uid));
+    child.stages = this.stages
+      .slice(this.nextStage)
+      .map((st) => st.filter((u) => movingUids.has(u)))
+      .filter((st) => st.length > 0);
     child.nextStage = 0;
     child.controls.throttle = 0;
     child.onRails = false;
@@ -807,6 +837,8 @@ export class Vessel {
       fuel: p.fuel,
       propellant: p.propellant,
       group: p.group,
+      depth: p.flowDepth,
+      command: !!p.def.command,
       engine: p.isEngine
         ? {
             thrustVac: p.stats.thrustVac * (p.flameout && !p.isSolid && p.ignitionsLeft <= 0 && !p.engineRunning ? 0 : 1),
@@ -815,10 +847,12 @@ export class Vessel {
             ispSL: p.stats.ispSL,
             propellant: p.isSolid ? 'solid' : p.def.engine!.propellant,
             solid: p.isSolid,
+            axial: Math.abs(_v.set(0, 1, 0).applyQuaternion(p.rotation).y),
           }
         : null,
       stage: stageOf.get(p.uid) ?? -1,
       decoupler: !!p.def.decoupler,
+      sepAt: p.def.decoupler && !p.def.decoupler.radial && p.attach === 'above' ? p.children.find((c) => c.attach === 'above')?.uid : undefined,
       ignited: p.engineIgnited,
     }));
   }
