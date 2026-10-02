@@ -56,7 +56,11 @@ Asset paths are relative (`base: './'`), so it works from a domain root or any s
 | Vercel                | `npm run build` | `dist`           | Framework preset: Vite                 |
 | Netlify               | `npm run build` | `dist`           | Node version is read from `.nvmrc`     |
 | Cloudflare Pages      | `npm run build` | `dist`           | Node version is read from `.nvmrc`     |
-| GitHub Pages          | `npm run build` | `dist`           | Publish `dist/` with a Pages workflow  |
+| GitHub Pages          | `npm run build` | `dist`           | Included: `.github/workflows/pages.yml` |
+
+The repository ships a GitHub Pages workflow that tests, builds and publishes on every push to
+`main` (one-time setup: Settings > Pages > Source: GitHub Actions). The site then lives at
+`https://<user>.github.io/<repo>/`.
 
 No environment variables or server are needed. Progress and saved rockets are stored in the
 player's browser (`localStorage`).
